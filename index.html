@@ -316,6 +316,7 @@ body::before{background:radial-gradient(circle at 18% 0%,color-mix(in srgb,var(-
 .hud-icons .hud-espaco,.hud-top .hud-espaco,.hud-bottom .hud-espaco{display:none}
 .nuvem.cheio{color:var(--err)}
 .nuvem.otimizando{color:var(--accent)}
+.nuvem.alerta{color:var(--warn);font-weight:700}
 dialog.dlg-medio{max-width:min(800px,95vw)}
 .bp-top{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
 .bp-chip{display:inline-flex;align-items:center;gap:7px;font-size:11.5px;font-weight:600;padding:5px 11px;
@@ -1461,7 +1462,7 @@ function conhecer(path,sim){
 
 const ROTULOS={local:'somente neste computador',ligando:'conectando…',ok:'base compartilhada',
   lendo:'sincronizando…',enviando:'enviando…',leitura:'compartilhada (somente leitura)',
-  erro:'sem conexão',cheio:'armazenamento cheio',otimizando:'otimizando…'};
+  erro:'sem conexão',cheio:'armazenamento cheio',otimizando:'otimizando…',alerta:'conferir a base'};
 function nuvemEstado(est,texto){
   NUVEM.estado=est;
   const el=document.getElementById('nuvemStatus');
@@ -1471,7 +1472,7 @@ function nuvemEstado(est,texto){
 }
 function nuvemRepouso(){
   if(NUVEM.limpando) return;
-  nuvemEstado(NUVEM.cheio?'cheio':(NUVEM.podeEscrever===false?'leitura':'ok'));
+  nuvemEstado(NUVEM.alerta?'alerta':NUVEM.cheio?'cheio':(NUVEM.podeEscrever===false?'leitura':'ok'));
 }
 const ehCota=e=>!!e&&(e.code==='quota_or_state'||/quota|exhaust/i.test(e.message||''));
 function declararCheio(){
@@ -2097,6 +2098,9 @@ function nuvemApagar(store,chave){
   if(!NUVEM.ligado||NUVEM.podeEscrever===false||!CAMINHO[store]) return;
   const path=CAMINHO[store]+'/'+chave;
   NUVEM.sujo.delete(path); NUVEM.ultimo.delete(path);
+  // o que estava esperando para ser gravado vai primeiro; senão a exclusão do colaborador
+  // chegava antes da troca de dono das fotos e a cascata do banco as apagava
+  if(NUVEM.sujo.size){ clearTimeout(NUVEM.timer); descarregar(); }
   return enfileirar(async()=>{
     if(store==='models'){                       // apaga também as imagens do modelo
       try{
@@ -2178,29 +2182,154 @@ async function atualizarMesesMemoria(){
     }
   }
 }
+/* ---------------------------------------------------------------------------
+   PROTEÇÃO CONTRA SUMIÇO
+   Antes, qualquer colaborador "conhecido" que a leitura da base não trouxesse
+   era apagado deste computador. Uma leitura incompleta bastava para esvaziar a
+   tela. Agora:
+   - o estado local é lido ANTES da leitura da base;
+   - cada candidato à remoção é conferido direto na base;
+   - se forem muitos colaboradores de uma vez, nada é removido e o usuário decide.
+   --------------------------------------------------------------------------- */
+async function linhasQueExistem(tabela,ids){
+  const achadas=new Set();
+  for(let i=0;i<ids.length;i+=80){
+    const {data,error}=await NUVEM.sb.from(tabela).select('id').in('id',ids.slice(i,i+80));
+    if(error) throw er(error);
+    for(const r of data||[]) achadas.add(r.id);
+  }
+  return achadas;
+}
+const limiteDeRemocao=total=>Math.max(5,Math.round(total*0.10));
+function sinalizarSumico(pessoasIds,fotosIds){
+  const primeira=!NUVEM.alerta;
+  const a=NUVEM.alerta||{pessoas:[],fotos:[],quando:Date.now()};
+  for(const id of pessoasIds) if(!a.pessoas.includes(id)) a.pessoas.push(id);
+  for(const id of fotosIds) if(!a.fotos.includes(id)) a.fotos.push(id);
+  NUVEM.alerta=a; NUVEM.ausentes=new Set([...a.pessoas,...a.fotos]);
+  nuvemRepouso();
+  if(primeira) toast(a.pessoas.length+' colaborador(es) deixaram de existir na base compartilhada. Por segurança, nada foi removido deste computador. Abra Base compartilhada para decidir.',14000);
+}
+/* Confere na base o que a leitura não trouxe. Devolve o que pode ser removido daqui. */
+async function conferirAusencias(candP,candF,totP,totF){
+  const r={pessoas:[],fotos:[],vivas:[]};
+  if(!candP.length&&!candF.length) return r;
+  const aindaP=await linhasQueExistem('pessoas',candP.map(p=>p.id));
+  const aindaF=await linhasQueExistem('fotos',candF.map(f=>f.id));
+  for(const p of candP) if(aindaP.has(p.id)) r.vivas.push(p.id);            // leitura incompleta: a base ainda tem
+  const pAus=candP.filter(p=>!aindaP.has(p.id)), fAus=candF.filter(f=>!aindaF.has(f.id));
+  // fotos que somem junto com o dono (exclusão em cascata) não contam como remoção à parte
+  const fIndep=fAus.filter(f=>!pAus.some(p=>p.id===f.personId));
+  if(pAus.length>limiteDeRemocao(totP)){
+    sinalizarSumico(pAus.map(p=>p.id),fAus.map(f=>f.id));
+    r.vivas.push(...pAus.map(p=>p.id));
+    return r;
+  }
+  r.pessoas=pAus;
+  if(fIndep.length>limiteDeRemocao(totF)){
+    // muitas fotos tiradas da base de uma vez (ex.: limpeza): ficam só neste computador, sem alarde
+    for(const f of fIndep){ f.soLocal=true; await dbPutLocal('photos',f); conhecer('fotos/'+f.id,false); }
+    r.fotos=fAus.filter(f=>pAus.some(p=>p.id===f.personId));
+  } else r.fotos=fAus;
+  return r;
+}
+async function restaurarAusentes(){
+  const a=NUVEM.alerta; if(!a) return;
+  busy(true,'Restaurando na base…',.2);
+  let np=0, nf=0;
+  try{
+    const locP=await dbAll('people'), locF=await dbAll('photos');
+    for(const p of locP) if(a.pessoas.includes(p.id)){
+      await comRetentativa(()=>NUVEM.db.doc('pessoas/'+p.id).set(Object.assign({},p,{rev:marcarRev()})));
+      conhecer('pessoas/'+p.id,true); np++;
+    }
+    for(const f of locF) if(a.fotos.includes(f.id)||a.pessoas.includes(f.personId)){
+      NUVEM.ultimo.delete('fotos/'+f.id);
+      try{ await subirFoto(Object.assign({},f)); nf++; }catch(e){}
+    }
+    NUVEM.alerta=null; NUVEM.ausentes=null;
+  }finally{ busy(false); }
+  nuvemRepouso();
+  toast(np+' colaborador(es) e '+nf+' foto(s) devolvidos à base compartilhada.',6000);
+}
+async function aceitarRemocao(){
+  const a=NUVEM.alerta; if(!a) return;
+  for(const id of a.fotos) await dbDelLocal('photos',id);
+  for(const f of await dbAll('photos')) if(a.pessoas.includes(f.personId)){ await dbDelLocal('photos',f.id); state.imgCache.delete(f.id); }
+  for(const id of a.pessoas){ await dbDelLocal('people',id); conhecer('pessoas/'+id,false); }
+  NUVEM.alerta=null; NUVEM.ausentes=null;
+  nuvemRepouso(); await reloadPeople(); renderPeople(); await renderMonth();
+  toast('Remoção aceita neste computador.',4000);
+}
+function alertaHtml(){
+  const a=NUVEM.alerta; if(!a) return '';
+  return '<div class="note err" style="margin-bottom:14px"><b>'+a.pessoas.length+' colaborador(es) deixaram de existir na base compartilhada.</b> '
+   +'Por segurança, nada foi removido deste computador.<br><span class="mini">Se alguém apagou de propósito, escolha “Aceitar remoção”. '
+   +'Se não foi proposital, “Restaurar na base” devolve tudo a partir deste computador.</span>'
+   +'<div class="bp-acts" style="margin-top:10px"><button type="button" class="btn sm primary" id="bpRestaurar">Restaurar na base</button>'
+   +'<button type="button" class="btn sm" id="bpAceitar">Aceitar remoção</button></div></div>';
+}
+/* Avisos de exclusão em tempo real: agrupados, conferidos na base e com freio. */
+function agendarRemocoes(){ clearTimeout(NUVEM.remTimer); NUVEM.remTimer=setTimeout(aplicarRemocoes,1500); }
+async function aplicarRemocoes(){
+  const buf=NUVEM.remBuf||[]; NUVEM.remBuf=[];
+  if(!buf.length) return;
+  try{
+    const ids={people:[],photos:[]};
+    for(const b of buf) if(ids[b.store]&&!ids[b.store].includes(b.id)) ids[b.store].push(b.id);
+    const locP=await dbAll('people'), locF=await dbAll('photos');
+    const aindaP=await linhasQueExistem('pessoas',ids.people), aindaF=await linhasQueExistem('fotos',ids.photos);
+    const pAus=ids.people.filter(id=>!aindaP.has(id)&&locP.some(p=>p.id===id));
+    const fAus=ids.photos.filter(id=>!aindaF.has(id)&&locF.some(f=>f.id===id));
+    if(pAus.length>limiteDeRemocao(locP.length)){ sinalizarSumico(pAus,fAus); return; }
+    const fIndep=fAus.filter(id=>{ const f=locF.find(x=>x.id===id); return !(f&&pAus.includes(f.personId)); });
+    for(const id of pAus) await dbDelLocal('people',id);
+    if(fIndep.length>limiteDeRemocao(locF.length)){
+      for(const id of fIndep){ const f=locF.find(x=>x.id===id); if(f){ f.soLocal=true; await dbPutLocal('photos',f); } }
+    }
+    for(const id of fAus){
+      const f=locF.find(x=>x.id===id);
+      if(fIndep.length>limiteDeRemocao(locF.length)&&fIndep.includes(id)) continue;
+      await dbDelLocal('photos',id); state.imgCache.delete(id);
+    }
+    if(pAus.length||fAus.length) repintarDepois();
+  }catch(e){ console.warn('remoções:',e&&e.message); }
+}
+
 /* Só documentos, que são pequenos; o arquivo da foto fica para quando ela for
    usada. O que não mudou (mesma revisão) é pulado. */
 async function baixarNuvem(silencioso){
   if(!NUVEM.ligado) return false;
   if(!silencioso) nuvemEstado('lendo');
   try{
+    // retrato local ANTES de ler a base: o que chegar durante a leitura não pode parecer "apagado"
+    const locP=await dbAll('people'), locF=await dbAll('photos');
+    const conhecidos0=new Set(NUVEM.conhecidos);
     const [pes,fot,mes]=await lerColecoes();
     const nuvemP=new Set(pes.docs.map(d=>d.id)), nuvemF=new Set(fot.docs.map(d=>d.id));
-    const locP=await dbAll('people'), locF=await dbAll('photos');
     const tarefas=[];
 
     // quem existe: o que está na base, mais o que nasceu só nesta máquina
     const vivos=new Set(nuvemP);
-    for(const p of locP) if(!nuvemP.has(p.id)&&!NUVEM.conhecidos.has('pessoas/'+p.id)) vivos.add(p.id);
+    for(const p of locP) if(!nuvemP.has(p.id)&&!conhecidos0.has('pessoas/'+p.id)) vivos.add(p.id);
     const leituraConfiavel=pes.docs.length>0;
-    // apagado por outra pessoa enquanto esta máquina estava fechada
+    if(NUVEM.alerta){                                   // a base voltou a ter o que faltava: o alerta cai
+      NUVEM.alerta.pessoas=NUVEM.alerta.pessoas.filter(id=>!nuvemP.has(id));
+      NUVEM.alerta.fotos=NUVEM.alerta.fotos.filter(id=>!nuvemF.has(id));
+      if(!NUVEM.alerta.pessoas.length){ NUVEM.alerta=null; NUVEM.ausentes=null; }
+    }
+    // apagado por outra pessoa enquanto esta máquina estava fechada: só depois de conferir na base
     if(leituraConfiavel){
-      for(const p of locP) if(!vivos.has(p.id)){ tarefas.push(dbDelLocal('people',p.id)); conhecer('pessoas/'+p.id,false); }
-      for(const f of locF){
+      const candP=locP.filter(p=>!vivos.has(p.id));
+      const candF=locF.filter(f=>{
         const semDono=f.personId!==PENDING&&!vivos.has(f.personId);
-        const apagada=!nuvemF.has(f.id)&&NUVEM.conhecidos.has('fotos/'+f.id);
-        if(semDono||apagada){ tarefas.push(dbDelLocal('photos',f.id)); state.imgCache.delete(f.id); conhecer('fotos/'+f.id,false); }
-      }
+        const apagada=!nuvemF.has(f.id)&&conhecidos0.has('fotos/'+f.id)&&!f.soLocal;
+        return semDono||apagada;
+      });
+      const r=await conferirAusencias(candP,candF,locP.length,locF.length);
+      for(const p of r.pessoas){ tarefas.push(dbDelLocal('people',p.id)); conhecer('pessoas/'+p.id,false); }
+      for(const f of r.fotos){ tarefas.push(dbDelLocal('photos',f.id)); state.imgCache.delete(f.id); conhecer('fotos/'+f.id,false); }
+      for(const id of r.vivas) vivos.add(id);
     }
 
     for(const d of pes.docs){ const v=d.data(); if(!v||!v.id) continue;
@@ -2239,9 +2368,10 @@ async function subirPendentes(pes,fot,mes,vivos){
   const np=new Set(pes.docs.map(d=>d.id)), nm=new Set(mes.docs.map(d=>d.id));
   const docFoto={}; for(const d of fot.docs) docFoto[d.id]=d.data()||{};
   const locP=await dbAll('people'), locF=await dbAll('photos'), locM=await dbAll('months');
-  const pFalta=locP.filter(p=>!np.has(p.id));
+  const emAlerta=id=>!!(NUVEM.ausentes&&NUVEM.ausentes.has(id));
+  const pFalta=locP.filter(p=>!np.has(p.id)&&!emAlerta(p.id));
   const mFalta=locM.filter(m=>!nm.has(m.key));
-  const fFalta=locF.filter(f=>!f.soLocal&&!docFoto[f.id]&&(f.personId===PENDING||vivos.has(f.personId)));
+  const fFalta=locF.filter(f=>!f.soLocal&&!emAlerta(f.id)&&!emAlerta(f.personId)&&!docFoto[f.id]&&(f.personId===PENDING||vivos.has(f.personId)));
   const semArq=locF.filter(f=>docFoto[f.id]&&!docFoto[f.id].anexo&&f.blob&&!NUVEM.cheio);
   const total=pFalta.length+mFalta.length+fFalta.length+semArq.length;
   if(!total) return;
@@ -2280,7 +2410,8 @@ function ouvirNuvem(){
             if(m.doc.metadata&&m.doc.metadata.hasPendingWrites) continue;
             if(m.type==='removed'){
               NUVEM.ultimo.delete(path); conhecer(path,false);
-              if(await dbGet(store,m.doc.id)){ await dbDelLocal(store,m.doc.id); state.imgCache.delete(m.doc.id); mexeu=true; }
+              // não apaga na hora: junta os avisos, confere na base e só então decide
+              (NUVEM.remBuf=NUVEM.remBuf||[]).push({store,id:m.doc.id}); agendarRemocoes();
               continue;
             }
             const v=m.doc.data(); if(!v) continue;
@@ -3835,10 +3966,13 @@ $('#btnImport').onclick=()=>{
       const list=parseList(b.querySelector('#impText').value,y);
       if(!list.length){ toast('Nenhuma linha reconhecida. Use o formato 06/10 – Nome.'); return false; }
       const r=await addEntries(list);
-      busy(true,'Preparando aniversariantes…',.3);
+      // Só liga cada nome ao colaborador, o que é instantâneo. Baixar a foto e analisar o rosto
+      // de cada pessoa é feito depois, ao gerar a arte: fazer tudo aqui travava a tela por
+      // vários minutos e disparava centenas de gravações na base.
+      busy(true,'Ligando aos colaboradores…',.3);
       for(const key of new Set(list.map(e=>mk(e.year,e.month)))){
         const rec=await getMonth(key);
-        for(const e of rec.entries) if(e.status==='idle') await prepareEntry(e,false);
+        await religarMes(rec);
         await saveMonth(rec);
       }
       busy(false);
@@ -3993,13 +4127,13 @@ $('#btnMerge').onclick=async()=>{
     const principal=g.slice().sort((a,b)=>nomeTokens(b.name).length-nomeTokens(a.name).length)[0];
     const fotos=g.reduce((n,p)=>n+((state.photos[p.id]||[]).length),0);
     return `<label style="display:flex;gap:10px;align-items:flex-start;padding:9px 0;border-bottom:1px solid var(--line2)">
-      <input type="checkbox" class="dupchk" value="${i}" checked style="width:auto;margin-top:4px">
+      <input type="checkbox" class="dupchk" value="${i}" style="width:auto;margin-top:4px">
       <span><b>${esc(principal.name)}</b><br><small class="mini">absorve: ${
         esc(g.filter(p=>p.id!==principal.id).map(p=>p.name).join(', '))} · ${fotos} foto(s) no total</small></span>
     </label>`;
   }).join('');
   dialog('Unificar cadastros duplicados',
-    html+'<p class="mini" style="margin-top:12px">As fotos passam para o cadastro de nome mais completo e as entradas dos meses são religadas. Nomes com sobrenome diferente não aparecem aqui.</p>',
+    html+'<p class="mini" style="margin-top:12px"><b>Nada vem marcado:</b> confira cada grupo e marque só os que são mesmo a mesma pessoa. As fotos passam para o cadastro de nome mais completo e as entradas dos meses são religadas. Nomes com sobrenome diferente não aparecem aqui.</p>',
     [{label:'Cancelar'},{label:'Unificar selecionados',primary:true,onClick:b=>{
       const sel=[...b.querySelectorAll('.dupchk:checked')].map(c=>grupos[+c.value]);
       if(!sel.length){ toast('Nada selecionado.'); return false; }
@@ -4040,6 +4174,7 @@ function contarConhecidos(prefixo){
 }
 function estadoDaBase(){
   if(!NUVEM.ligado) return {t:'Somente neste computador',c:'warn'};
+  if(NUVEM.alerta) return {t:'Conferir a base',c:'err'};
   if(NUVEM.podeEscrever===false) return {t:'Somente leitura',c:'warn'};
   if(NUVEM.limpando) return {t:'Otimizando…',c:''};
   if(NUVEM.cheio) return {t:'Armazenamento cheio',c:'err'};
@@ -4054,8 +4189,8 @@ function htmlPainelBase(u,l,est){
       <div class="bp-num">${mb(u.usado)}<small> de ${u.limite?mb(u.limite):'—'}</small></div>
       <div class="bp-bar${pct>85?' alto':''}"><i style="width:${pct}%"></i></div>
       <div class="bp-rows">
-        ${linha('Colaboradores',contarConhecidos('pessoas/'))}
-        ${linha('Fotos cadastradas',contarConhecidos('fotos/'))}
+        ${linha('Colaboradores',Math.max(0,contarConhecidos('pessoas/')-(NUVEM.alerta?NUVEM.alerta.pessoas.length:0)))}
+        ${linha('Fotos cadastradas',Math.max(0,contarConhecidos('fotos/')-(NUVEM.alerta?NUVEM.alerta.fotos.length:0)))}
         ${linha('Arquivos de foto',u.n+(u.maxN?' de '+u.maxN:''))}
         ${linha('Meses com lista',contarConhecidos('meses/'))}
         ${u.banco?linha('Banco de dados',mb(u.banco)+' de '+mb(LIMITE_BANCO)):''}
@@ -4081,7 +4216,7 @@ function htmlPainelBase(u,l,est){
         <button type="button" class="btn sm" id="bpMemoria">Limpar memória do app</button>
       </div>
       <p class="mini" style="margin:0">Os originais importados aqui nunca são alterados.</p>`;
-  return `<div class="bp-top"><span class="bp-chip ${est.c}"><i></i>${est.t}</span>
+  return alertaHtml()+`<div class="bp-top"><span class="bp-chip ${est.c}"><i></i>${est.t}</span>
       <span class="mini">${NUVEM.ligado?'Todos os usuários veem o mesmo cadastro.':'As alterações ficam só neste computador.'}</span>
       <button type="button" class="btn sm ghost" id="bpConexao" style="margin-left:auto">Conexão</button></div>
     <div class="bp-grid">
@@ -4096,6 +4231,8 @@ $('#btnEspaco').onclick=async()=>{
   d.addEventListener('close',()=>d.classList.remove('dlg-medio'),{once:true});
   const liga=(id,fn)=>{ const el=d.querySelector(id); if(el) el.onclick=()=>{ d.close(); fn(); }; };
   liga('#bpConexao',()=>abrirConexao());
+  liga('#bpRestaurar',()=>restaurarAusentes());
+  liga('#bpAceitar',()=>aceitarRemocao());
   liga('#bpLimpar',()=>limpezaManual());
   liga('#bpMelhor',()=>liberarEspaco());
   liga('#bpReduzir',()=>compactarLocal());
