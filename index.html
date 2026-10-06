@@ -917,6 +917,7 @@ body.hud-right main{margin:0 268px 0 0}
       <div class="trow">
         <button class="btn" id="btnNewPerson">Novo colaborador</button>
         <button class="btn" id="btnMerge">Unificar duplicados</button>
+        <button class="btn" id="btnPadronizar">Padronizar nomes</button>
         <button class="btn" id="btnEspaco">Base compartilhada</button>
         <button class="btn danger" id="btnWipe">Limpar cadastro</button>
       </div></div>
@@ -928,7 +929,7 @@ body.hud-right main{margin:0 268px 0 0}
       </div></div>
   </div>
   <div class="panel hide" id="pendPanel" style="margin-bottom:16px">
-    <div class="panel-h pending-head"><div><h2>Fotos a confirmar</h2><span class="mini" id="pendCount"></span></div><div class="pending-actions"><button class="btn sm" id="btnPendAll">Selecionar todos</button><button class="btn sm" id="btnPendNone">Limpar seleção</button><button class="btn sm primary" id="btnCatalogSelected">Criar e catalogar selecionados</button></div></div>
+    <div class="panel-h pending-head"><div><h2>Fotos a confirmar</h2><span class="mini" id="pendCount"></span></div><div class="pending-actions"><button class="btn sm" id="btnPendAll">Selecionar todos</button><button class="btn sm" id="btnPendNone">Limpar seleção</button><button class="btn sm primary" id="btnCatalogSelected">Catalogar selecionados</button><button class="btn sm" id="btnCriarSelecionados">Criar colaboradores…</button></div></div>
     <div class="panel-b"><div id="pendList"></div></div>
   </div>
   <div class="panel">
@@ -1907,7 +1908,7 @@ async function executarImportacaoZipFotos(arquivo){
   for(const p of pessoasIdx.values()){
     const key=normKey(p.nome);
     let alvo=antes.find(x=>x.id===p.id)||antes.find(x=>x.key===key);
-    if(!alvo){ alvo={id:p.id,name:p.nome,key}; await dbPut('people',alvo); state.people.push(alvo); }
+    if(!alvo){ alvo={id:p.id,name:bonito(p.nome),key}; await dbPut('people',alvo); state.people.push(alvo); }
     usado.set(p.id,alvo.id);
   }
   const entradas=Object.values(zip.files).filter(z=>!z.dir&&IMG_EXT.test(z.name));
@@ -2718,6 +2719,42 @@ async function liberarEspaco(){
 }
 
 
+/* ---------------------------------------------------------------------------
+   NOMES BONITOS
+   BRUNA-DE-GIACOMETI-CHAVES-CABRAL -> Bruna de Giacometi Chaves Cabral
+   GABRIEL LUCAS -> Gabriel Lucas | Adriele Aparecida Da Silva -> Adriele Aparecida da Silva
+   Só mexe em maiúsculas, hífen de separador e partículas (de, da, do, das, dos, e).
+   Nunca troca uma letra por outra: a identidade do nome (normKey) fica igual.
+   Palavra escrita de propósito com maiúscula no meio (McDonald, DeSouza) é mantida.
+   --------------------------------------------------------------------------- */
+const PARTICULAS_NOME=new Set(['de','da','do','das','dos','e']);
+const ROMANOS_NOME=new Set(['II','III','IV','VI','VII','VIII','IX']);
+function bonito(nome){
+  let t=String(nome==null?'':nome).replace(/[\u0000-\u001f]/g,' ').replace(/_+/g,' ').trim();
+  if(!/\s/.test(t)) t=t.replace(/-+/g,' ');          // "BRUNA-DE-GIACOMETI": o hífen separa as palavras
+  t=t.replace(/\s+/g,' ').trim();
+  if(!t) return '';
+  const cap=s=>s.charAt(0).toLocaleUpperCase('pt-BR')+s.slice(1);
+  const parte=p=>{
+    if(!p) return p;
+    const baixo=p.toLocaleLowerCase('pt-BR'), alto=p.toLocaleUpperCase('pt-BR');
+    return (p===alto||p===baixo)?cap(baixo):p;       // tudo maiúsculo ou tudo minúsculo; o resto foi escrito de propósito
+  };
+  return t.split(' ').map((w,i)=>{
+    if(w.length>1&&w===w.toUpperCase()&&ROMANOS_NOME.has(w)) return w;      // Pedro II, João III
+    const baixo=w.toLocaleLowerCase('pt-BR');
+    if(i>0&&PARTICULAS_NOME.has(baixo)) return baixo;
+    return w.split(/([-'’])/).map(parte).join('');
+  }).join(' ');
+}
+/* Quem já está no cadastro com o mesmo primeiro nome (para sugerir, nunca para criar). */
+function mesmoPrimeiroNome(nome){
+  const t=nomeTokens(nome); if(!t.length) return [];
+  return state.people.filter(p=>{ const q=nomeTokens(p.name); return q.length&&_compat(t[0],q[0])>=0.8; });
+}
+const sugestoesDe=cands=>cands.map(c=>({id:c.person.id,nome:c.person.name,s:Math.round(c.score*100)}));
+const sugestoesPrimeiroNome=nome=>mesmoPrimeiroNome(nome).slice(0,5).map(p=>({id:p.id,nome:p.name,s:0}));
+
 /* Normaliza acentos, maiúsculas, hífens, underlines e pontuação,
    para que "BRUNA-DE-GIACOMETI" e "Bruna De Giacometi" virem a mesma chave. */
 function normKey(s){
@@ -3056,7 +3093,7 @@ async function getOrCreatePerson(name,rep){
   const key=normKey(name);
   let p=state.people.find(x=>x.key===key);
   if(p) return p;
-  p={id:uid(),name:(name||'').trim().replace(/\s+/g,' '),key};
+  p={id:uid(),name:bonito(name),key};
   await dbPut('people',p);
   state.people.push(p);
   if(rep) rep.novas.add(p.id);
@@ -3082,20 +3119,23 @@ async function importPhotos(files,opts){
       let personId=opts.personId||(opts.donos&&opts.donos.get(f))||null, pend=null;
       if(!personId){
         const det=nomeDoArquivo(f);
+        // Regra: colaborador só nasce sozinho quando o nome é de uma pasta E ninguém no cadastro
+        // tem o mesmo primeiro nome. Nome em dúvida, com sobrenome diferente ou vindo de arquivo
+        // solto fica em "Fotos a confirmar", com os parecidos sugeridos.
         if(det.dePasta){
-          // a pasta manda, mas se já houver alguém equivalente reaproveita o cadastro
           const d=decidirPessoa(det.nome);
-          personId=(d.tipo==='certo')?d.person.id:(await getOrCreatePerson(det.nome,rep)).id;
+          if(d.tipo==='certo') personId=d.person.id;
+          else if(d.tipo==='duvida'){ personId=PENDING; pend={nome:bonito(det.nome),sug:sugestoesDe(d.cands)}; }
+          else {
+            const parecidos=sugestoesPrimeiroNome(det.nome);
+            if(parecidos.length){ personId=PENDING; pend={nome:bonito(det.nome),sug:parecidos}; }
+            else personId=(await getOrCreatePerson(det.nome,rep)).id;
+          }
         } else if(det.nome){
           const d=decidirPessoa(det.nome);
           if(d.tipo==='certo') personId=d.person.id;
-          else if(d.tipo==='duvida'){
-            personId=PENDING;
-            pend={nome:det.nome,sug:d.cands.map(c=>({id:c.person.id,nome:c.person.name,s:Math.round(c.score*100)}))};
-          } else if(det.nome.split(' ').length>=2){
-            personId=(await getOrCreatePerson(det.nome,rep)).id;
-          } else { personId=PENDING; pend={nome:det.nome||det.pastaRaiz,sug:[]}; }
-        } else { personId=PENDING; pend={nome:det.pastaRaiz||'',sug:[]}; }
+          else { personId=PENDING; pend={nome:bonito(det.nome),sug:d.tipo==='duvida'?sugestoesDe(d.cands):sugestoesPrimeiroNome(det.nome)}; }
+        } else { personId=PENDING; pend={nome:bonito(det.pastaRaiz||''),sug:[]}; }
       }
       const existentes=await dbByPerson(personId);
       if(existentes.some(e=>e.fileName===f.name&&e.size===f.size)){ rep.dup++; continue; }
@@ -3106,7 +3146,7 @@ async function importPhotos(files,opts){
       await dbPut('photos',ph);
       state.imgCache.set(id,img);
       rep.importadas++;
-      if(personId===PENDING){ if(pend&&pend.sug.length) rep.revisar++; else rep.semDono++; }
+      if(personId===PENDING){ if(pend&&pend.sug.length) rep.revisar++; else if(pend&&pend.nome) rep.novosNomes=(rep.novosNomes||0)+1; else rep.semDono++; }
       else rep.pessoas.add(personId);
     }catch(err){ rep.falhas.push({nome:f.name,motivo:(err&&err.message)||'não foi possível ler'}); }
     if(i%3===2) await new Promise(r=>setTimeout(r,0));
@@ -3124,6 +3164,7 @@ function showReport(r){
   h+=li('OK',`${r.importadas} foto(s) identificada(s) e importada(s)`,'ok');
   h+=li('OK',`${r.pessoas.size} colaborador(es) encontrado(s)`+(r.novas.size?` · ${r.novas.size} cadastrado(s) agora`:''),'ok');
   if(r.revisar) h+=li('!',`${r.revisar} foto(s) precisam de confirmação`,'warn');
+  if(r.novosNomes) h+=li('!',`${r.novosNomes} nome(s) novo(s) aguardando sua confirmação para virar colaborador`,'warn');
   if(r.semDono) h+=li('X',`${r.semDono} arquivo(s) não puderam ser associados`,'err');
   if(r.falhas.length) h+=li('X',`${r.falhas.length} arquivo(s) não puderam ser lidos`,'err');
   if(r.dup) h+=li('—',`${r.dup} já estavam cadastradas`,'mut');
@@ -3131,9 +3172,9 @@ function showReport(r){
   if(r.falhas.length){
     h+='<div class="faillist">'+r.falhas.slice(0,30).map(x=>`${esc(x.nome)} — ${esc(x.motivo)}`).join('<br>')+'</div>';
   }
-  if(r.revisar||r.semDono) h+='<p class="mini" style="margin-top:12px">As fotos pendentes ficam em “Fotos a confirmar”, na aba Colaboradores. Nada foi descartado.</p>';
-  const btns=[{label:'Fechar',primary:!(r.revisar||r.semDono)}];
-  if(r.revisar||r.semDono) btns.push({label:'Revisar agora',primary:true,onClick:()=>{ setTab('colab'); renderPending(); }});
+  if(r.revisar||r.semDono||r.novosNomes) h+='<p class="mini" style="margin-top:12px">As fotos pendentes ficam em “Fotos a confirmar”, na aba Colaboradores. Nada foi descartado.</p>';
+  const btns=[{label:'Fechar',primary:!(r.revisar||r.semDono||r.novosNomes)}];
+  if(r.revisar||r.semDono||r.novosNomes) btns.push({label:'Revisar agora',primary:true,onClick:()=>{ setTab('colab'); renderPending(); }});
   dialog('Resultado da importação',h,btns);
 }
 
@@ -3185,7 +3226,7 @@ async function addEntries(list){
     for(const e of byKey[key]){
       const nk=normKey(e.name);
       if(rec.entries.some(x=>normKey(x.name)===nk&&x.day===e.day)){ dup++; continue; }
-      rec.entries.push({id:uid(),name:e.name.trim(),day:e.day,month:e.month,year:e.year,
+      rec.entries.push({id:uid(),name:bonito(e.name),day:e.day,month:e.month,year:e.year,
         personId:null,photoId:null,framing:null,hat:null,manual:false,status:'idle',msg:''});
       added++;
     }
@@ -3747,7 +3788,7 @@ async function renderPending(){
     const acts=div.querySelector('.acts');
     for(const sgg of sug){
       const b=document.createElement('button');
-      b.className='btn sm'; b.textContent=`É ${sgg.nome} (${sgg.s}%)`;
+      b.className='btn sm'; b.textContent=sgg.s?`É ${sgg.nome} (${sgg.s}%)`:`É ${sgg.nome}`;
       b.onclick=()=>assignPending(ph.id,sgg.id);
       acts.appendChild(b);
     }
@@ -3774,6 +3815,7 @@ async function renderPending(){
   $('#btnPendAll')&&($('#btnPendAll').onclick=()=>all.forEach(c=>c.checked=true));
   $('#btnPendNone')&&($('#btnPendNone').onclick=()=>all.forEach(c=>c.checked=false));
   $('#btnCatalogSelected')&&($('#btnCatalogSelected').onclick=catalogSelectedPending);
+  $('#btnCriarSelecionados')&&($('#btnCriarSelecionados').onclick=criarSelecionadosPending);
 }
 async function assignPending(photoId,personId){
   const ph=await dbGet('photos',photoId);
@@ -3786,7 +3828,7 @@ async function assignPending(photoId,personId){
 }
 function newPersonFromPhoto(ph){
   dialog('Criar colaborador para esta foto',
-   `<div class="fgrp"><label class="fl">Nome completo</label><input type="text" id="npName" value="${esc((ph.pending&&ph.pending.nome)||'')}"></div>`,
+   `<div class="fgrp"><label class="fl">Nome completo</label><input type="text" id="npName" value="${esc(bonito((ph.pending&&ph.pending.nome)||''))}"></div>`,
    [{label:'Cancelar'},{label:'Criar e associar',primary:true,onClick:async b=>{
       const v=b.querySelector('#npName').value.trim();
       if(!v){ toast('Informe o nome.'); return false; }
@@ -4120,6 +4162,7 @@ async function unificarGrupo(g){
   }
   return principal;
 }
+$('#btnPadronizar').onclick=()=>{ abrirPadronizar(); };
 $('#btnMerge').onclick=async()=>{
   const grupos=acharDuplicados();
   if(!grupos.length){ toast('Nenhum cadastro duplicado encontrado.'); return; }
@@ -4880,6 +4923,83 @@ async function applyChapeleiro(){
   }
 }
 
+/* ---------------------------------------------------------------------------
+   Criar colaboradores a partir de fotos pendentes: ação explícita, com os nomes
+   à vista antes de qualquer cadastro. Nada disso acontece mais sozinho.
+   --------------------------------------------------------------------------- */
+async function criarSelecionadosPending(){
+  const checks=[...document.querySelectorAll('.pend-select:checked')];
+  if(!checks.length){ toast('Selecione pelo menos uma foto.'); return; }
+  const grupos=new Map(); let semNome=0;
+  for(const c of checks){
+    const ph=await dbGet('photos',c.value); if(!ph) continue;
+    const nome=bonito((ph.pending&&ph.pending.nome)||'');
+    if(!nome){ semNome++; continue; }
+    const k=normKey(nome); const g=grupos.get(k)||{nome,fotos:[]};
+    g.fotos.push(ph.id); grupos.set(k,g);
+  }
+  if(!grupos.size){ toast('As fotos selecionadas não têm nome lido. Use “Criar colaborador” em cada uma.',6000); return; }
+  const novos=[], existentes=[];
+  for(const g of grupos.values()){ (state.people.find(p=>p.key===normKey(g.nome))?existentes:novos).push(g); }
+  const lista=novos.map(g=>`<li>${esc(g.nome)} <span class="mini">· ${g.fotos.length} foto(s)</span></li>`).join('');
+  const aviso=(existentes.length?`<p class="mini" style="margin:10px 0 0">${existentes.length} nome(s) já existem no cadastro e serão apenas ligados às fotos.</p>`:'')
+    +(semNome?`<p class="mini" style="margin:6px 0 0">${semNome} foto(s) sem nome lido ficam para você resolver uma a uma.</p>`:'');
+  dialog('Criar colaboradores',
+    `<p style="margin:0 0 8px">Estes nomes vão virar <b>${novos.length}</b> colaborador(es) novo(s). Confira antes de criar:</p>
+     <ul style="margin:0;padding-left:20px;max-height:240px;overflow:auto;line-height:1.7">${lista||'<li class="mini">nenhum novo</li>'}</ul>${aviso}`,
+    [{label:'Cancelar'},{label:novos.length?`Criar ${novos.length} e ligar as fotos`:'Ligar às fotos',primary:true,onClick:async()=>{
+      busy(true,'Criando…',.2);
+      for(const g of grupos.values()){
+        const p=await getOrCreatePerson(g.nome);
+        for(const id of g.fotos){ const ph=await dbGet('photos',id); if(ph){ ph.personId=p.id; ph.pending=null; await dbPut('photos',ph); } }
+      }
+      busy(false); await reloadPeople(); renderPeople(); renderMonth();
+      toast(`${novos.length} colaborador(es) criado(s).`,4000);
+    }}]);
+}
+
+/* ---------------------------------------------------------------------------
+   Padronizar nomes: mostra o que vai mudar e só aplica o que você confirmar.
+   --------------------------------------------------------------------------- */
+function planoPadronizar(){
+  const pessoas=[], entradas=[];
+  for(const p of state.people){
+    const n=bonito(p.name);
+    if(n&&n!==p.name&&normKey(n)===normKey(p.name)) pessoas.push({p,antes:p.name,depois:n});
+  }
+  for(const key of Object.keys(state.months)){
+    for(const e of state.months[key].entries){
+      const n=bonito(e.name);
+      if(n&&n!==e.name&&normKey(n)===normKey(e.name)) entradas.push({key,e,antes:e.name,depois:n});
+    }
+  }
+  return {pessoas,entradas};
+}
+function abrirPadronizar(){
+  const pl=planoPadronizar();
+  if(!pl.pessoas.length&&!pl.entradas.length){ toast('Os nomes já estão padronizados.',3500); return; }
+  const linhas=(arr,max)=>arr.slice(0,max).map(x=>`<tr><td>${esc(x.antes)}</td><td>→</td><td><b>${esc(x.depois)}</b></td></tr>`).join('')
+    +(arr.length>max?`<tr><td colspan="3" class="mini">… e mais ${arr.length-max}</td></tr>`:'');
+  const bloco=(id,titulo,arr)=>arr.length?`<label style="display:flex;gap:8px;align-items:center;margin:14px 0 6px;font-weight:600">
+      <input type="checkbox" id="${id}" checked style="width:auto"> ${titulo} (${arr.length})</label>
+      <div style="max-height:170px;overflow:auto"><table style="width:100%;font-size:12.5px;border-collapse:collapse">${linhas(arr,40)}</table></div>`:'';
+  dialog('Padronizar nomes',
+    `<p class="mini" style="margin:0">Só maiúsculas, hífens e partículas (de, da, do, dos, e). Nenhuma letra é trocada, então ninguém deixa de ser encontrado.</p>`
+    +bloco('padPessoas','Colaboradores',pl.pessoas)+bloco('padEntradas','Nomes nas listas dos meses',pl.entradas),
+    [{label:'Cancelar'},{label:'Aplicar',primary:true,onClick:async b=>{
+      const quer=id=>{ const c=b.querySelector('#'+id); return !!c&&c.checked; };
+      busy(true,'Padronizando…',.2); let np=0, ne=0;
+      if(quer('padPessoas')) for(const x of pl.pessoas){ x.p.name=x.depois; await dbPut('people',x.p); np++; }
+      if(quer('padEntradas')){
+        const meses=new Set(pl.entradas.map(x=>x.key));
+        for(const x of pl.entradas){ x.e.name=x.depois; ne++; }
+        for(const k of meses) await saveMonth(state.months[k]);
+      }
+      busy(false); await reloadPeople(); renderPeople(); await renderMonth();
+      toast(`${np} colaborador(es) e ${ne} nome(s) de lista padronizados.`,4500);
+    }}]);
+}
+
 async function catalogSelectedPending(){
   const checks=[...document.querySelectorAll('.pend-select:checked')];
   if(!checks.length){ toast('Selecione pelo menos uma foto.'); return; }
@@ -4896,13 +5016,13 @@ async function catalogSelectedPending(){
       const d=decidirPessoa(nome);
       if(d.tipo==='certo') pid=d.person.id;
     }
-    if(!pid&&sug.length===1) pid=sug[0].id;
-    if(!pid&&nome&&nomeTokens(nome).length>=2&&!rankPeople(nome,1).length)
-      pid=(await getOrCreatePerson(nome)).id;     // só cria quando não há candidato algum
+    if(!pid&&sug.length===1&&sug[0].s>0) pid=sug[0].id;
+    // Catalogar só LIGA a quem já existe, quando a identificação é certa. Nunca cria colaborador:
+    // quem é novo ou está em dúvida continua em "Fotos a confirmar" até você decidir.
     if(pid){ await assignPending(ph.id,pid); ok++; } else review++;
     busy(true,`Catalogando fotos… ${i+1}/${checks.length}`,(i+1)/checks.length); await new Promise(r=>setTimeout(r,0));
   }
-  busy(false); await reloadPeople(); renderPeople(); renderMonth(); toast(`${ok} foto(s) catalogada(s)${review?` · ${review} para revisão`:''}.`);
+  busy(false); await reloadPeople(); renderPeople(); renderMonth(); toast(`${ok} foto(s) catalogada(s)${review?` · ${review} continuam para confirmar (nome novo ou em dúvida)`:''}.`,5000);
 }
 
 /* ================================================================
@@ -4950,7 +5070,7 @@ async function catalogSelectedPending(){
      repetitiva. A busca conta quantas palavras batem, então frase torta e
      pergunta incompleta também encontram o assunto. */
   const KB=[
-    {k:['importar','pasta'],a:'importFotos',r:['Em Colaboradores, botão Importar pasta. A estrutura é Colaboradores/Nome da Pessoa/foto.png — a subpasta vira o colaborador.','Use Importar pasta em Colaboradores. Cada subpasta com o nome da pessoa vira um cadastro, e as fotos de dentro vão para ela.']},
+    {k:['importar','pasta'],a:'importFotos',r:['Em Colaboradores, botão Importar pasta. A estrutura é Colaboradores/Nome da Pessoa/foto.png — a subpasta vira o colaborador só se o primeiro nome for novo no cadastro; se parecer com alguém que já existe, a foto fica em Fotos a confirmar.','Use Importar pasta em Colaboradores. Cada subpasta com o nome da pessoa vira um cadastro, e as fotos de dentro vão para ela.']},
     {k:['foto','solta'],a:'importFotos',r:['Fotos soltas também entram: o nome do arquivo é usado para identificar a pessoa. O que não der para associar vai para Fotos a confirmar.']},
     {k:['adicionar foto','mais uma foto','outra foto para'],a:'people',r:['Para adicionar foto a alguém específico, abra o cartão do colaborador em Colaboradores e use Adicionar fotos.']},
     {k:['quantas','foto','pessoa'],r:['Não há limite. Quando existe mais de uma, o app dá nota a cada foto e usa a melhor: frontalidade, nitidez, espaço acima da cabeça, ombros visíveis, luz e resolução.']},
@@ -4962,9 +5082,9 @@ async function catalogSelectedPending(){
     {k:['arquivo','nao','abriu'],r:['Arquivos que não abrem aparecem nomeados no relatório de importação, com o motivo. Normalmente é formato que o navegador não lê, como HEIC.']},
     {k:['relatorio','importacao'],r:['Ao fim de cada importação aparece o resultado: quantas fotos entraram, quantos colaboradores, quantas precisam de confirmação, quantas não foram associadas e quais arquivos falharam.']},
     {k:['pendente','confirmar'],a:'catalog',r:['As fotos que não deu para associar ficam em Fotos a confirmar, no topo de Colaboradores. Você escolhe a pessoa ou cria um cadastro.']},
-    {k:['catalogar'],a:'catalog',r:['Catalogar é resolver as fotos pendentes: o app sugere quem é e você confirma. Ele só cria cadastro novo quando não existe nenhum candidato parecido.']},
+    {k:['catalogar'],a:'catalog',r:['Catalogar é resolver as fotos pendentes: o app sugere quem é e você confirma. Ele só liga a foto a quem já está no cadastro, quando a identificação é certa, e nunca cria colaborador sozinho. Para criar, use Criar colaborador ou Criar colaboradores…, que mostram os nomes antes.']},
     {k:['descartar','foto'],r:['No painel de Fotos a confirmar há o botão Descartar, que remove a foto do aplicativo. Ele pede confirmação.']},
-    {k:['criar','colaborador'],a:'people',r:['Em Colaboradores, botão Novo colaborador. Também dá para criar direto de uma foto pendente.']},
+    {k:['criar','colaborador'],a:'people',r:['Em Colaboradores, botão Novo colaborador. Também dá para criar direto de uma foto pendente, uma a uma ou várias de uma vez em Criar colaboradores…, com os nomes à vista antes.']},
     {k:['excluir','apagar','remov','colaborador'],a:'people',r:['Abra o cartão do colaborador e use Excluir colaborador. Ele apaga as fotos junto e desliga as entradas dos meses.']},
     {k:['renomear','nome','colaborador'],a:'people',r:['Abra o cartão do colaborador e edite o nome no campo do topo. A lista do mês volta a procurar com o nome novo.']},
     {k:['buscar','pesquisar','colaborador'],a:'people',r:['No cabeçalho de Colaboradores há a busca por nome, que funciona junto com a ordenação.']},
