@@ -1391,8 +1391,18 @@ function autoHatAntigo(a,f){
 /* ================================================================
    6. ESTADO
    ================================================================ */
+class CacheImg extends Map{                 // imagens já decodificadas, com limite: o excesso é descartado
+  constructor(max){ super(); this.max=max; }
+  set(k,v){
+    if(super.has(k)) super.delete(k);
+    super.set(k,v);
+    while(this.size>this.max) super.delete(this.keys().next().value);
+    return this;
+  }
+  get(k){ if(!super.has(k)) return undefined; const v=super.get(k); super.delete(k); super.set(k,v); return v; }
+}
 const state={people:[],photos:{},months:{},year:new Date().getFullYear(),month:new Date().getMonth()+1,
-             entryId:null,tab:'aniv',imgCache:new Map(),blobs:new Map(),thumbs:new Map()};
+             entryId:null,tab:'aniv',imgCache:new CacheImg(24),blobs:new Map(),thumbs:new Map()};
 const PENDING='__pendente__';
 const mk=(y,m)=>`${y}-${String(m).padStart(2,'0')}`;
 
@@ -1434,7 +1444,7 @@ const NUVEM_LADO=860, NUVEM_ALVO=120*1024, LIMITE_GRANDE=250*1024;
 const CAMINHO={people:'pessoas',photos:'fotos',months:'meses',models:'modelos'};
 const chaveDe=(store,v)=>store==='months'?v.key:v.id;
 const TAB={pessoas:{t:'pessoas',pk:'id'},fotos:{t:'fotos',pk:'id'},meses:{t:'meses',pk:'chave'},modelos:{t:'modelos',pk:'id'}};
-const semBlob=o=>{ const c=Object.assign({},o); delete c.blob; delete c.blobNuvem; return c; };
+const semBlob=o=>{ const c=Object.assign({},o); delete c.blob; delete c.blobNuvem; delete c.__pequena; return c; };
 const esperar=ms=>new Promise(r=>setTimeout(r,ms));
 const mb=n=>(n/1048576).toFixed(n>=10485760?0:1)+' MB';
 const ehCota=e=>!!e&&(e.code==='quota_or_state'||/quota|exhaust/i.test(e.message||''));
@@ -1783,6 +1793,7 @@ async function dbPut(s,v){
 async function gravarFoto(ph){
   let anexo=ph.anexo||null, marca=ph.marca||null;
   const blob=ph.blob||BLOBS.get(ph.id)||null;
+  let pequena=ph.__pequena||null;                  // cópia reduzida já pronta (importação de pasta)
   if(!anexo&&blob){
     if(!marca) marca=await digital(blob);
     if(marca){                                   // a mesma foto já foi enviada antes?
@@ -1790,16 +1801,17 @@ async function gravarFoto(ph){
       if(igual) anexo=igual.anexo;
     }
   }
-  if(!anexo&&blob){
+  if(!anexo&&(blob||pequena)){
     if(NUVEM.cheio){ const e=new Error('armazenamento cheio'); e.code='quota_or_state'; throw e; }
-    const pequena=(await compactarParaNuvem(blob))||blob;
+    pequena=pequena||(await compactarParaNuvem(blob))||blob;
     if(pequena.size>LIMITE_SUBIDA) throw new Error('foto grande demais para enviar ('+mb(pequena.size)+')');
     try{ anexo=(await emVoo(()=>comRetentativa(()=>NUVEM.anexos.upload(pequena)))).id; }
     catch(e){ if(ehCota(e)) declararCheio(); throw e; }
   }
   const doc=semBlob(ph); doc.anexo=anexo; doc.url=anexo?urlDeAnexo(anexo):null; doc.marca=marca; doc.rev=marcarRev();
   await emVoo(()=>comRetentativa(()=>NUVEM.db.doc('fotos/'+ph.id).set(doc)),'fotos/'+ph.id);
-  guardarNaMemoria('photos',Object.assign({},doc,blob?{blob}:{}));
+  // na memória fica só a cópia reduzida, nunca o arquivo original (que pode ter vários MB)
+  guardarNaMemoria('photos',Object.assign({},doc,pequena?{blob:pequena}:{}));
   return doc;
 }
 /* A lista de um mês é editada em rajada (arrastar, digitar). Junta as edições de meio
@@ -2077,21 +2089,21 @@ function abrirConexao(){
 function _paraBlob(cv,tipo,q){
   return new Promise(r=>{ try{ cv.toBlob(b=>r(b),tipo,q); }catch(e){ r(null); } });
 }
-async function compactarParaNuvem(blob){
+async function compactarParaNuvem(blob,imgPronta,dims){
   if(!blob) return null;
-  let img=null;
-  try{ img=await decodeBlob(blob); }catch(e){ return blob; }
-  const iw=img.width||img.naturalWidth, ih=img.height||img.naturalHeight;
-  if(!iw||!ih){ if(img.close) img.close(); return blob; }
+  let img=imgPronta||null, fechar=false;
+  if(!img){ try{ img=await decodeBlob(blob); fechar=true; }catch(e){ return blob; } }
+  const iw=(dims&&dims.w)||img.width||img.naturalWidth, ih=(dims&&dims.h)||img.height||img.naturalHeight;
+  if(!iw||!ih){ if(fechar&&img.close) img.close(); return blob; }
   const k=Math.min(1,NUVEM_LADO/Math.max(iw,ih));
-  if(k>=1&&blob.size<=NUVEM_ALVO){ if(img.close) img.close(); return blob; }
+  if(k>=1&&blob.size<=NUVEM_ALVO){ if(fechar&&img.close) img.close(); return blob; }
   const cv=document.createElement('canvas');
   cv.width=Math.max(1,Math.round(iw*k)); cv.height=Math.max(1,Math.round(ih*k));
   const g=cv.getContext('2d');
   g.imageSmoothingEnabled=true; g.imageSmoothingQuality='high';
   g.fillStyle='#ffffff'; g.fillRect(0,0,cv.width,cv.height);
   g.drawImage(img,0,0,cv.width,cv.height);
-  if(img.close) img.close();
+  if(fechar&&img.close) img.close();
   let melhor=null;
   for(const [tipo,q] of [['image/webp',0.82],['image/jpeg',0.82],['image/jpeg',0.7]]){
     const b=await _paraBlob(cv,tipo,q);
@@ -2949,6 +2961,47 @@ async function getOrCreatePerson(name,rep){
 
 /* Importação inteligente: identifica, associa e só devolve para revisão
    o que não deu para resolver sozinho. */
+/* ---------------------------------------------------------------------------
+   IMPORTAÇÃO DE PASTAS: rápida e sem estourar a memória
+   - cada foto é decodificada UMA vez, já reduzida (a leitura reduzida do JPEG é bem mais
+     rápida e usa uma fração da memória); a análise volta para a escala original;
+   - a imagem decodificada é liberada assim que a foto é processada;
+   - o envio ao Supabase corre em paralelo com a análise da foto seguinte;
+   - nada de manter o arquivo original na memória: só a cópia reduzida que sobe.
+   --------------------------------------------------------------------------- */
+function dimensoesDe(blob){                 // tamanho original (já com a rotação) sem decodificar os pixels
+  return new Promise(res=>{
+    const url=URL.createObjectURL(blob), im=new Image();
+    im.onload=()=>{ const r={w:im.naturalWidth,h:im.naturalHeight}; URL.revokeObjectURL(url); res(r.w&&r.h?r:null); };
+    im.onerror=()=>{ URL.revokeObjectURL(url); res(null); };
+    im.src=url;
+  });
+}
+async function decodeReduzida(blob,lado){
+  const dims=await dimensoesDe(blob);
+  if(!dims||typeof createImageBitmap!=='function'||Math.max(dims.w,dims.h)<=lado) return {img:await decodeBlob(blob),dims:null};
+  const k=lado/Math.max(dims.w,dims.h);
+  try{
+    const img=await createImageBitmap(blob,{resizeWidth:Math.max(1,Math.round(dims.w*k)),resizeHeight:Math.max(1,Math.round(dims.h*k)),resizeQuality:'medium'});
+    return {img,dims};
+  }catch(e){ return {img:await decodeBlob(blob),dims:null}; }
+}
+/* Analisa a imagem reduzida e devolve o resultado na escala da foto original. */
+async function analyzeImageEscala(img,dims){
+  const iw=img.width||img.naturalWidth, ih=img.height||img.naturalHeight;
+  const a=await analyzeImage(img);
+  if(!dims||(dims.w===iw&&dims.h===ih)) return a;
+  const k=dims.w/iw;
+  for(const c of ['faceX','faceY','faceW','faceH','headTop','chin','headCx','headW']) if(typeof a[c]==='number') a[c]*=k;
+  a.iw=dims.w; a.ih=dims.h;
+  const bonus=m=>m>=480?6:(m>=300?3:0), dif=bonus(Math.min(dims.w,dims.h))-bonus(Math.min(iw,ih));
+  if(dif&&a.ok&&typeof a.score==='number'){
+    a.score=Math.max(0,Math.min(100,a.score+dif));
+    a.needsReview=a.score<58||(a.src!=='api'&&a.conf<0.45)||a.nFaces>1;
+    a.reason=a.nFaces>1?'mais de um rosto na foto':(a.score<58?'confiança baixa no enquadramento automático':'');
+  }
+  return a;
+}
 async function importPhotos(files,opts){
   opts=opts||{};
   const todos=[...files];
@@ -2958,11 +3011,19 @@ async function importPhotos(files,opts){
   if(!todos.length){ toast('A seleção não trouxe nenhum arquivo. Tente escolher a pasta novamente.',4200); return rep; }
   if(!imgs.length){ showReport(rep); return rep; }
   busy(true,'Lendo as fotos…',0);
+  const ativos=new Set(), jaNesta=new Set();
+  const naFila=async job=>{ while(ativos.size>=3) await Promise.race(ativos); const p=job().finally(()=>ativos.delete(p)); ativos.add(p); };
+  const adiante=new Map();
+  const preparar=j=>{ if(j<imgs.length&&!adiante.has(j)) adiante.set(j,decodeReduzida(imgs[j],1600).then(r=>r,e=>({erro:e}))); };
   for(let i=0;i<imgs.length;i++){
     const f=imgs[i];
     busy(true,`Lendo as fotos… ${i+1}/${imgs.length}`,(i+1)/imgs.length);
+    let img=null, dims=null;
     try{
-      const img=await decodeBlob(f);            // se não abrir, o arquivo é reportado
+      for(let k=0;k<=3;k++) preparar(i+k);                          // as próximas já vão sendo decodificadas
+      const lido=await adiante.get(i); adiante.delete(i);
+      if(lido.erro) throw lido.erro;                                // se não abrir, o arquivo é reportado
+      ({img,dims}=lido);
       let personId=opts.personId||(opts.donos&&opts.donos.get(f))||null, pend=null;
       if(!personId){
         const det=nomeDoArquivo(f);
@@ -2985,19 +3046,29 @@ async function importPhotos(files,opts){
         } else { personId=PENDING; pend={nome:bonito(det.pastaRaiz||''),sug:[]}; }
       }
       const existentes=await dbByPerson(personId);
-      if(existentes.some(e=>e.fileName===f.name&&e.size===f.size)){ rep.dup++; continue; }
+      const chaveDup=personId+'|'+f.name+'|'+f.size;
+      if(existentes.some(e=>e.fileName===f.name&&e.size===f.size)||jaNesta.has(chaveDup)){ rep.dup++; continue; }
+      jaNesta.add(chaveDup);
       const id=(opts.ids&&opts.ids.get(f))||uid();
+      const analysis=await analyzeImageEscala(img,dims);
+      const pequena=await compactarParaNuvem(f,img,dims);          // reduz a partir da imagem já decodificada
       const ph={id,personId,fileName:f.name,size:f.size,type:mimeDe(f)||f.type||'',
-                rel:f.webkitRelativePath||'',blob:f,pending:pend,
-                thumb:makeThumb(img,140),analysis:await analyzeImage(img)};
-      await dbPut('photos',ph);
-      state.imgCache.set(id,img);
-      rep.importadas++;
-      if(personId===PENDING){ if(pend&&pend.sug.length) rep.revisar++; else if(pend&&pend.nome) rep.novosNomes=(rep.novosNomes||0)+1; else rep.semDono++; }
-      else rep.pessoas.add(personId);
+                rel:f.webkitRelativePath||'',blob:f,__pequena:pequena,pending:pend,
+                thumb:makeThumb(img,140),analysis};
+      await naFila(async()=>{                                       // o envio corre junto com a análise da próxima
+        try{
+          await dbPut('photos',ph);
+          rep.importadas++;
+          if(personId===PENDING){ if(pend&&pend.sug.length) rep.revisar++; else if(pend&&pend.nome) rep.novosNomes=(rep.novosNomes||0)+1; else rep.semDono++; }
+          else rep.pessoas.add(personId);
+        }catch(err){ rep.falhas.push({nome:f.name,motivo:(err&&err.message)||'não foi possível enviar'}); }
+      });
     }catch(err){ rep.falhas.push({nome:f.name,motivo:(err&&err.message)||'não foi possível ler'}); }
+    finally{ if(img&&img.close){ try{ img.close(); }catch(e){} } }
     if(i%3===2) await new Promise(r=>setTimeout(r,0));
   }
+  busy(true,'Enviando as últimas fotos…',1);
+  await Promise.all(ativos);
   busy(false);
   await reloadPeople();
   renderPeople(); renderMonth();
