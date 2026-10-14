@@ -1431,7 +1431,7 @@ class CacheImg extends Map{                 // imagens já decodificadas, com li
   get(k){ if(!super.has(k)) return undefined; const v=super.get(k); super.delete(k); super.set(k,v); return v; }
 }
 const state={people:[],photos:{},months:{},year:new Date().getFullYear(),month:new Date().getMonth()+1,
-             entryId:null,tab:'aniv',imgCache:new CacheImg(24),blobs:new Map(),thumbs:new Map()};
+             entryId:null,tab:'aniv',imgCache:new CacheImg(4),blobs:new Map(),thumbs:new Map()};
 const PENDING='__pendente__';
 const mk=(y,m)=>`${y}-${String(m).padStart(2,'0')}`;
 
@@ -1459,17 +1459,30 @@ const NUVEM={db:null,anexos:null,sb:null,cfg:null,ligado:false,podeEscrever:null
   estado:'ligando',cheio:false,limpando:false,importando:false,ouvindo:false,sincronizando:false,
   minhas:new Set(),pendentes:0,erroGravacao:null,progresso:'',remBuf:[],escrevendo:new Set(),erroConfig:null};
 const MEM={people:new Map(),photos:new Map(),months:new Map(),models:new Map()};
-const BLOBS=new Map();                 // arquivos de foto desta sessão: só na memória, nunca gravados aqui
+/* Arquivos de foto são guardados EXATAMENTE como vieram (vários MB cada). Os que são baixados para
+   gerar uma arte ficam num cache com limite de bytes, para a página nunca crescer sem controle. */
+class CacheBlobs extends Map{
+  constructor(maxBytes){ super(); this.maxBytes=maxBytes; this.bytes=0; }
+  set(k,v){
+    if(super.has(k)) this.delete(k);
+    super.set(k,v); this.bytes+=(v&&v.size)||0;
+    while(this.bytes>this.maxBytes&&this.size>1) this.delete(this.keys().next().value);
+    return this;
+  }
+  delete(k){ const v=super.get(k); const r=super.delete(k); if(r) this.bytes-=(v&&v.size)||0; return r; }
+  clear(){ super.clear(); this.bytes=0; }
+}
+const BLOBS=new CacheBlobs(120*1048576);
 const MESES_PEND=new Map();            // listas de mês com gravação marcada, juntando edições rápidas
+const ENVIOS=new Map();                // marca do arquivo -> envio em andamento (o mesmo arquivo nunca sobe duas vezes ao mesmo tempo)
 
 const BUCKET='anivercut';
 const LIMITE_ARMAZENAMENTO=1024*1048576;     // plano gratuito: 1 GB de arquivos
 const LIMITE_BANCO=500*1048576;              // plano gratuito: 500 MB de banco
 const EXT_DE={'image/jpeg':'jpg','image/webp':'webp','image/png':'png','image/gif':'gif','image/avif':'avif'};
 const novoId=()=>(window.crypto&&crypto.randomUUID)?crypto.randomUUID():('x'+Date.now().toString(36)+Math.random().toString(36).slice(2,10));
-const LIMITE_SUBIDA=3*1024*1024;      // nada acima disto sobe: é sinal de falha na redução
+const LIMITE_ARQUIVO=50*1048576;      // o plano gratuito do Supabase não aceita arquivo acima de 50 MB
 const LER=1000;
-const NUVEM_LADO=860, NUVEM_ALVO=120*1024, LIMITE_GRANDE=250*1024;
 const CAMINHO={people:'pessoas',photos:'fotos',months:'meses',models:'modelos'};
 const chaveDe=(store,v)=>store==='months'?v.key:v.id;
 const TAB={pessoas:{t:'pessoas',pk:'id'},fotos:{t:'fotos',pk:'id'},meses:{t:'meses',pk:'chave'},modelos:{t:'modelos',pk:'id'}};
@@ -1819,28 +1832,46 @@ async function dbPut(s,v){
     }
   }catch(e){ avisarFalha(e,'salvar'); throw e; }
 }
+/* O arquivo da foto sobe EXATAMENTE como veio: mesmos bytes, mesma resolução, mesma qualidade.
+   Nada é reduzido nem recomprimido. O campo "orig" marca a foto cujo arquivo está intacto. */
+function erroDeEnvio(e,blob){
+  const msg=(e&&e.message)||'';
+  if(/maximum allowed size|too large|payload|exceed/i.test(msg)||(e&&(e.status===413||String(e.statusCode)==='413'))){
+    const x=new Error('o Supabase recusou o arquivo de '+mb(blob.size)+' (limite do bucket). No SQL Editor, rode: update storage.buckets set file_size_limit = 52428800 where id = \'anivercut\';');
+    x.supabase=true; return x;
+  }
+  return e;
+}
+async function liberarArquivoSeSolto(anexo){
+  if(!anexo) return;
+  if([...MEM.photos.values()].some(f=>f.anexo===anexo)) return;      // ainda é usado por outra foto
+  await removerArquivos([anexo]);
+}
 async function gravarFoto(ph){
-  let anexo=ph.anexo||null, marca=ph.marca||null;
-  const blob=ph.blob||BLOBS.get(ph.id)||null;
-  let pequena=ph.__pequena||null;                  // cópia reduzida já pronta (importação de pasta)
-  if(!anexo&&blob){
+  let anexo=ph.anexo||null, marca=ph.marca||null, orig=ph.orig===true;
+  const blob=ph.blob||null;                        // só chega aqui quando há um arquivo NOVO para enviar
+  if(blob){
+    if(blob.size>LIMITE_ARQUIVO) throw new Error('o arquivo tem '+mb(blob.size)+' e o Supabase gratuito aceita até '+mb(LIMITE_ARQUIVO));
     if(!marca) marca=await digital(blob);
-    if(marca){                                   // a mesma foto já foi enviada antes?
-      const igual=[...MEM.photos.values()].find(o=>o.id!==ph.id&&o.marca===marca&&o.anexo);
-      if(igual) anexo=igual.anexo;
+    // este mesmo arquivo original já foi enviado por outra foto? reaproveita, sem reenviar e sem alterar
+    const igual=marca&&[...MEM.photos.values()].find(o=>o.id!==ph.id&&o.marca===marca&&o.anexo&&o.orig===true);
+    if(igual){ anexo=igual.anexo; orig=true; }
+    else{
+      if(NUVEM.cheio){ const e=new Error('armazenamento cheio'); e.code='quota_or_state'; throw e; }
+      let envio=marca?ENVIOS.get(marca):null;          // outra foto está enviando este mesmo arquivo agora?
+      if(!envio){
+        envio=(async()=>{
+          try{ return (await emVoo(()=>comRetentativa(()=>NUVEM.anexos.upload(blob)))).id; }
+          catch(e){ if(ehCota(e)) declararCheio(); throw erroDeEnvio(e,blob); }
+        })();
+        if(marca){ ENVIOS.set(marca,envio); envio.then(()=>ENVIOS.delete(marca),()=>ENVIOS.delete(marca)); }
+      }
+      anexo=await envio; orig=true;
     }
   }
-  if(!anexo&&(blob||pequena)){
-    if(NUVEM.cheio){ const e=new Error('armazenamento cheio'); e.code='quota_or_state'; throw e; }
-    pequena=pequena||(await compactarParaNuvem(blob))||blob;
-    if(pequena.size>LIMITE_SUBIDA) throw new Error('foto grande demais para enviar ('+mb(pequena.size)+')');
-    try{ anexo=(await emVoo(()=>comRetentativa(()=>NUVEM.anexos.upload(pequena)))).id; }
-    catch(e){ if(ehCota(e)) declararCheio(); throw e; }
-  }
-  const doc=semBlob(ph); doc.anexo=anexo; doc.url=anexo?urlDeAnexo(anexo):null; doc.marca=marca; doc.rev=marcarRev();
+  const doc=semBlob(ph); doc.anexo=anexo; doc.url=anexo?urlDeAnexo(anexo):null; doc.marca=marca; doc.orig=orig; doc.rev=marcarRev();
   await emVoo(()=>comRetentativa(()=>NUVEM.db.doc('fotos/'+ph.id).set(doc)),'fotos/'+ph.id);
-  // na memória fica só a cópia reduzida, nunca o arquivo original (que pode ter vários MB)
-  guardarNaMemoria('photos',Object.assign({},doc,pequena?{blob:pequena}:{}));
+  guardarNaMemoria('photos',doc);                  // o arquivo (vários MB) não fica na memória
   return doc;
 }
 /* A lista de um mês é editada em rajada (arrastar, digitar). Junta as edições de meio
@@ -2115,35 +2146,6 @@ function abrirConexao(){
 }
 
 /* ---------- espaço, compactação e limpeza ---------- */
-function _paraBlob(cv,tipo,q){
-  return new Promise(r=>{ try{ cv.toBlob(b=>r(b),tipo,q); }catch(e){ r(null); } });
-}
-async function compactarParaNuvem(blob,imgPronta,dims){
-  if(!blob) return null;
-  let img=imgPronta||null, fechar=false;
-  if(!img){ try{ img=await decodeBlob(blob); fechar=true; }catch(e){ return blob; } }
-  const iw=(dims&&dims.w)||img.width||img.naturalWidth, ih=(dims&&dims.h)||img.height||img.naturalHeight;
-  if(!iw||!ih){ if(fechar&&img.close) img.close(); return blob; }
-  const k=Math.min(1,NUVEM_LADO/Math.max(iw,ih));
-  if(k>=1&&blob.size<=NUVEM_ALVO){ if(fechar&&img.close) img.close(); return blob; }
-  const cv=document.createElement('canvas');
-  cv.width=Math.max(1,Math.round(iw*k)); cv.height=Math.max(1,Math.round(ih*k));
-  const g=cv.getContext('2d');
-  g.imageSmoothingEnabled=true; g.imageSmoothingQuality='high';
-  g.fillStyle='#ffffff'; g.fillRect(0,0,cv.width,cv.height);
-  g.drawImage(img,0,0,cv.width,cv.height);
-  if(fechar&&img.close) img.close();
-  let melhor=null;
-  for(const [tipo,q] of [['image/webp',0.82],['image/jpeg',0.82],['image/jpeg',0.7]]){
-    const b=await _paraBlob(cv,tipo,q);
-    if(!b||!b.type||b.type.indexOf(tipo.split('/')[1])<0) continue;
-    if(!melhor||b.size<melhor.size) melhor=b;
-    if(b.size<=NUVEM_ALVO) break;
-  }
-  cv.width=cv.height=1;
-  if(!melhor) return blob;
-  return melhor.size<blob.size?melhor:blob;
-}
 async function digital(blob){
   try{
     const n=blob.size, bloco=16384; let h=2166136261;
@@ -2188,8 +2190,7 @@ async function analisarBase(){
   const usados=new Set(docs.map(d=>d.anexo).filter(Boolean));
   const agora=Date.now();
   const arq=new Map(lista.assets.map(a=>[a.id,a]));
-  const grandes=[...usados].map(id=>arq.get(id)).filter(a=>a&&a.sizeBytes>LIMITE_GRANDE)
-                  .sort((a,b)=>b.sizeBytes-a.sizeBytes);
+  const grandes=[];            // fotos nunca são reduzidas: ficam exatamente como foram enviadas
   // arquivo recém-enviado pode ainda não ter o documento: só conta como solto com 15 min de idade
   const soltos=lista.assets.filter(a=>!usados.has(a.id)&&agora-Date.parse(a.createdAt||0)>15*60000);
   const semDono=pes.docs.length?docs.filter(d=>d.personId!==PENDING&&!pessoas.has(d.personId)):[];
@@ -2199,6 +2200,8 @@ async function analisarBase(){
           bytesSoltos:soltos.reduce((n,a)=>n+a.sizeBytes,0)};
 }
 
+/* Limpeza profunda: remove o que sobra no armazenamento. As fotos NUNCA são reduzidas nem
+   recomprimidas: ficam exatamente como foram enviadas. */
 async function limpezaProfunda(modo,opc){
   opc=opc||{};
   if(!NUVEM.ligado||!NUVEM.anexos||NUVEM.podeEscrever===false||NUVEM.limpando) return null;
@@ -2210,10 +2213,10 @@ async function limpezaProfunda(modo,opc){
     return null;
   }
   NUVEM.limpando=true;
-  const rel={reduzidos:0,liberado:0,soltos:0,bytesSoltos:0,semDono:0,erros:0,antes:0,depois:0};
+  const rel={soltos:0,bytesSoltos:0,semDono:0,erros:0,antes:0,depois:0};
   const prog=t=>{ NUVEM.progresso=t; nuvemEstado('otimizando',t); };
   try{
-    prog('otimizando · lendo o Supabase');
+    prog('limpando · lendo o Supabase');
     const plano=await analisarBase();
     if(plano.erro){ if(modo==='manual') toast(plano.erro,5000); return null; }
     rel.antes=plano.uso.bytes;
@@ -2221,7 +2224,7 @@ async function limpezaProfunda(modo,opc){
 
     // 1. fotos de colaboradores que não existem mais (só a pedido)
     if(opc.removerSemDono&&plano.semDono.length){
-      prog('otimizando · fotos sem colaborador');
+      prog('limpando · fotos sem colaborador');
       for(const d of plano.semDono){
         try{
           const outros=docs.filter(x=>x.id!==d.id&&x.anexo===d.anexo);
@@ -2241,47 +2244,6 @@ async function limpezaProfunda(modo,opc){
       catch(e){ rel.erros++; }
     }
     if(rel.soltos) NUVEM.cheio=false;
-
-    // 3. reduz os arquivos grandes, do maior para o menor
-    const grandes=plano.grandes.filter(a=>usadosAgora.has(a.id));
-    let i=0;
-    for(const a of grandes){
-      i++;
-      prog(`otimizando ${i}/${grandes.length} · ${mb(rel.liberado)} liberados`);
-      if(i%12===0){ try{ await NUVEM.db.doc('sistema/limpeza').acquire({holder,ttlMs:600000}); }catch(e){} }
-      try{
-        const deste=docs.filter(d=>d.anexo===a.id);
-        let fonte=null;
-        for(const d of deste){ const b=BLOBS.get(d.id); if(b&&b.size>=a.sizeBytes*0.9){ fonte=b; break; } }
-        if(!fonte){ const r=await fetch(urlDeAnexo(a.id)); if(r.ok) fonte=await r.blob(); }
-        if(!fonte){ rel.erros++; continue; }
-        const pequena=await compactarParaNuvem(fonte);
-        if(!pequena||pequena.size>=a.sizeBytes*0.8||pequena.size>LIMITE_SUBIDA){ rel.erros++; continue; }
-
-        // primeiro envia a pequena; só apaga a grande depois que o cadastro aponta para a nova
-        let novo=null, jaApagou=false;
-        try{ novo=await comRetentativa(()=>NUVEM.anexos.upload(pequena)); }
-        catch(e){
-          if(!ehCota(e)) throw e;
-          for(const d of deste) BLOBS.set(d.id,pequena);        // sem espaço nenhum: guarda a pequena na memória, libera a grande e sobe de novo
-          await comRetentativa(()=>NUVEM.anexos.delete(a.id)); jaApagou=true;
-          novo=await comRetentativa(()=>NUVEM.anexos.upload(pequena));
-        }
-        for(const d of deste){
-          const rev=marcarRev();
-          await comRetentativa(()=>NUVEM.db.doc('fotos/'+d.id).update({anexo:novo.id,url:urlDeAnexo(novo.id),rev}));
-          const loc=MEM.photos.get(d.id);
-          if(loc){ loc.anexo=novo.id; loc.url=urlDeAnexo(novo.id); loc.rev=rev; }
-          const b=BLOBS.get(d.id); if(b&&b.size>pequena.size) BLOBS.set(d.id,pequena);
-          state.imgCache.delete(d.id);
-        }
-        if(!jaApagou) await comRetentativa(()=>NUVEM.anexos.delete(a.id));
-        rel.reduzidos++; rel.liberado+=a.sizeBytes-pequena.size; rel.depois+=pequena.size;
-        NUVEM.cheio=false;
-      }catch(e){ rel.erros++; console.warn('limpeza:',a.id,e&&(e.message||e.code)); }
-    }
-
-    // 4. cache: imagens decodificadas e artes geradas
     state.imgCache.clear(); _retas.clear(); state.blobs.clear(); state.thumbs.clear();
     return rel;
   }catch(e){
@@ -2293,8 +2255,7 @@ async function limpezaProfunda(modo,opc){
     const u=await mostrarEspaco();
     if(u&&u.limite) rel.depois=u.usado;
     nuvemRepouso();
-    if(modo==='auto'&&(rel.reduzidos||rel.soltos))
-      toast(`Supabase otimizado: ${mb(rel.liberado+rel.bytesSoltos)} liberados.`,6000);
+    if(modo==='auto'&&rel.soltos) toast(`Supabase: ${mb(rel.bytesSoltos)} de arquivos soltos removidos.`,6000);
     repintarDepois();
   }
 }
@@ -2303,10 +2264,8 @@ async function verificarLimpezaAuto(){
   try{ if(sessionStorage.getItem('anivercut-limpeza')) return; }catch(e){}
   const u=await mostrarEspaco();
   if(!u) return;
-  const grandes=u.assets.filter(a=>a.sizeBytes>LIMITE_GRANDE).length;
-  if(!grandes&&!(u.limite&&u.usado>u.limite*0.85)) return;
+  if(!(u.limite&&u.usado>u.limite*0.85)) return;          // só atua quando o armazenamento está quase cheio
   try{ sessionStorage.setItem('anivercut-limpeza','1'); }catch(e){}
-  toast('Otimizando o Supabase em segundo plano. Você pode continuar usando o app.',6000);
   await limpezaProfunda('auto');
 }
 
@@ -3039,14 +2998,14 @@ async function importPhotos(files,opts){
              pessoas:new Set(),novas:new Set(),revisar:0,semDono:0,falhas:[]};
   if(!todos.length){ toast('A seleção não trouxe nenhum arquivo. Tente escolher a pasta novamente.',4200); return rep; }
   if(!imgs.length){ showReport(rep); return rep; }
-  busy(true,'Lendo as fotos…',0);
+  busy(true,'Enviando as fotos…',0);
   const ativos=new Set(), jaNesta=new Set();
-  const naFila=async job=>{ while(ativos.size>=3) await Promise.race(ativos); const p=job().finally(()=>ativos.delete(p)); ativos.add(p); };
+  const naFila=async job=>{ while(ativos.size>=4) await Promise.race(ativos); const p=job().finally(()=>ativos.delete(p)); ativos.add(p); };
   const adiante=new Map();
   const preparar=j=>{ if(j<imgs.length&&!adiante.has(j)) adiante.set(j,decodeReduzida(imgs[j],1600).then(r=>r,e=>({erro:e}))); };
   for(let i=0;i<imgs.length;i++){
     const f=imgs[i];
-    busy(true,`Lendo as fotos… ${i+1}/${imgs.length}`,(i+1)/imgs.length);
+    busy(true,`Enviando as fotos… ${i+1}/${imgs.length}`,(i+1)/imgs.length);
     let img=null, dims=null;
     try{
       for(let k=0;k<=3;k++) preparar(i+k);                          // as próximas já vão sendo decodificadas
@@ -3076,20 +3035,29 @@ async function importPhotos(files,opts){
       }
       const existentes=await dbByPerson(personId);
       const chaveDup=personId+'|'+f.name+'|'+f.size;
-      if(existentes.some(e=>e.fileName===f.name&&e.size===f.size)||jaNesta.has(chaveDup)){ rep.dup++; continue; }
+      const igual=existentes.find(e=>e.fileName===f.name&&e.size===f.size);
+      // já cadastrada com o arquivo ORIGINAL (ou repetida nesta mesma leva): nada a fazer
+      if(jaNesta.has(chaveDup)||(igual&&igual.orig===true)){ rep.dup++; continue; }
       jaNesta.add(chaveDup);
-      const id=(opts.ids&&opts.ids.get(f))||uid();
+      // já cadastrada, mas com um arquivo reduzido de versões antigas: troca pelo original e mantém o cadastro
+      const trocando=igual||null, velhoAnexo=trocando?trocando.anexo:null;
+      const id=trocando?trocando.id:((opts.ids&&opts.ids.get(f))||uid());
       const analysis=await analyzeImageEscala(img,dims);
-      const pequena=await compactarParaNuvem(f,img,dims);          // reduz a partir da imagem já decodificada
-      const ph={id,personId,fileName:f.name,size:f.size,type:mimeDe(f)||f.type||'',
-                rel:f.webkitRelativePath||'',blob:f,__pequena:pequena,pending:pend,
-                thumb:makeThumb(img,140),analysis};
+      const novos={id,personId,fileName:f.name,size:f.size,type:mimeDe(f)||f.type||'',
+                rel:f.webkitRelativePath||'',blob:f,pending:pend,thumb:makeThumb(img,140),analysis};
+      const ph=trocando?Object.assign({},trocando,novos,{anexo:null,url:null,marca:null,orig:false,chapeleiro:undefined,chapeleiroV:undefined,pending:trocando.pending}):novos;
       await naFila(async()=>{                                       // o envio corre junto com a análise da próxima
         try{
-          await dbPut('photos',ph);
-          rep.importadas++;
-          if(personId===PENDING){ if(pend&&pend.sug.length) rep.revisar++; else if(pend&&pend.nome) rep.novosNomes=(rep.novosNomes||0)+1; else rep.semDono++; }
-          else rep.pessoas.add(personId);
+          await dbPut('photos',ph);                                  // sobe o arquivo exatamente como veio
+          if(trocando){
+            rep.trocadas=(rep.trocadas||0)+1;
+            await liberarArquivoSeSolto(velhoAnexo);
+            state.imgCache.delete(id); BLOBS.delete(id);
+          } else {
+            rep.importadas++;
+            if(personId===PENDING){ if(pend&&pend.sug.length) rep.revisar++; else if(pend&&pend.nome) rep.novosNomes=(rep.novosNomes||0)+1; else rep.semDono++; }
+            else rep.pessoas.add(personId);
+          }
         }catch(err){ rep.falhas.push({nome:f.name,motivo:(err&&err.message)||'não foi possível enviar'}); }
       });
     }catch(err){ rep.falhas.push({nome:f.name,motivo:(err&&err.message)||'não foi possível ler'}); }
@@ -3109,6 +3077,7 @@ function showReport(r){
   const li=(ic,txt,cls)=>`<div class="rep ${cls||''}"><b>${ic}</b><span>${txt}</span></div>`;
   let h='';
   h+=li('OK',`${r.importadas} foto(s) identificada(s) e importada(s)`,'ok');
+  if(r.trocadas) h+=li('OK',`${r.trocadas} foto(s) que já estavam cadastradas tiveram o arquivo trocado pelo original, na qualidade exata`,'ok');
   h+=li('OK',`${r.pessoas.size} colaborador(es) encontrado(s)`+(r.novas.size?` · ${r.novas.size} cadastrado(s) agora`:''),'ok');
   if(r.revisar) h+=li('!',`${r.revisar} foto(s) precisam de confirmação`,'warn');
   if(r.novosNomes) h+=li('!',`${r.novosNomes} nome(s) novo(s) aguardando sua confirmação para virar colaborador`,'warn');
@@ -4212,7 +4181,6 @@ async function limpezaManual(){
   busy(false);
   if(p.erro){ toast(p.erro,5000); return; }
   const itens=[];
-  if(p.grandes.length) itens.push(`${p.grandes.length} foto(s) grande(s) para reduzir (${mb(p.bytesGrandes)} ocupados)`);
   if(p.soltos.length) itens.push(`${p.soltos.length} arquivo(s) que nenhum cadastro usa (${mb(p.bytesSoltos)})`);
   if(p.semArquivo.length) itens.push(`${p.semArquivo.length} cadastro(s) de foto sem arquivo no Supabase (só aviso: o arquivo não existe mais e não há cópia para reenviar)`);
   if(p.semDono.length) itens.push(`${p.semDono.length} foto(s) de colaboradores que não existem mais`);
@@ -4222,7 +4190,6 @@ async function limpezaManual(){
   const rel=await limpezaProfunda('manual',{removerSemDono:incluirSemDono});
   if(!rel){ return; }
   const partes=[];
-  if(rel.reduzidos) partes.push(`${rel.reduzidos} foto(s) reduzida(s), ${mb(rel.liberado)} liberados`);
   if(rel.soltos) partes.push(`${rel.soltos} arquivo(s) solto(s) removido(s), ${mb(rel.bytesSoltos)}`);
   if(rel.semDono) partes.push(`${rel.semDono} foto(s) sem dono removida(s)`);
   if(rel.erros) partes.push(`${rel.erros} item(ns) não puderam ser tratados e ficaram como estavam`);
@@ -4506,7 +4473,7 @@ function _girar(img,graus){
   g.translate(w/2,h/2); g.rotate(a); g.drawImage(img,-iw/2,-ih/2);
   return cv;
 }
-const _retas=new Map();
+const _retas=new CacheImg(3);
 function imagemReta(photoId,img,graus){
   if(!graus||!img) return img;
   const chave=photoId+':'+graus;
@@ -5017,7 +4984,7 @@ async function catalogSelectedPending(){
     {k:['limpar','cadastro'],a:'people',r:['Limpar cadastro remove todos os colaboradores e fotos. As listas de aniversariantes continuam, só ficam sem foto. Ele confirma antes, mostrando os números.']},
     {k:['backup','exportar','cadastro'],a:'people',r:['Em Colaboradores, Backup, Exportar gera um arquivo com cadastros e fotos. No outro computador, use Restaurar.']},
     {k:['restaurar'],a:'people',r:['Restaurar lê o arquivo de backup e devolve cadastros, fotos e meses. O que já existe é mantido.']},
-    {k:['dados','onde','ficam'],r:['O cadastro e as fotos reduzidas ficam só no Supabase. Este computador não guarda cópia: ao abrir, o app lê tudo do Supabase.']},
+    {k:['dados','onde','ficam'],r:['O cadastro e as fotos ficam só no Supabase, exatamente como foram enviadas, sem redução de qualidade. Este computador não guarda cópia: ao abrir, o app lê tudo do Supabase.']},
     {k:['perder','dados'],r:['Limpar os dados do site não apaga nada: o cadastro está só no Supabase e aparece de novo na próxima abertura. Mesmo assim, exporte um backup de vez em quando.']},
     {k:['internet','offline'],r:['O app precisa de internet: não há cópia neste computador. Sem conexão ele avisa e não salva nada, para nenhuma alteração parecer feita sem estar.']},
     {k:['celular','mobile'],r:['No celular funciona, mas a importação de pasta não existe em navegador móvel. Use fotos soltas ou faça a importação pelo computador.']},
