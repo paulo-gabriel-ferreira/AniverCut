@@ -784,6 +784,21 @@ body.hud-right main{margin:0 268px 0 0}
 .inicio-passos li:before{content:counter(passo);width:26px;height:26px;border-radius:50%;background:var(--accent-soft);color:var(--accent-ink);font-weight:700;font-size:13px;display:grid;place-items:center}
 .inicio-passos b{color:var(--ink)}
 @media(max-width:860px){.inicio-cols{grid-template-columns:1fr}}
+
+/* ---- Teste de qualidade ---- */
+.tq-lista{display:grid;gap:12px;max-height:46vh;overflow:auto;margin:0 0 12px;padding-right:4px}
+.tq-item{border:1px solid var(--line);border-radius:12px;padding:12px;background:var(--panel2)}
+.tq-par{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.tq-par figure{margin:0;text-align:center}
+.tq-slot{display:grid;place-items:center;background:#101a57;border-radius:10px;overflow:hidden;min-height:60px}
+.tq-slot canvas{display:block;width:210px;max-width:100%;height:auto}
+.tq-par figcaption{font-size:12.5px;color:var(--ink2);margin-top:6px;line-height:1.4}
+.tq-item .mini{margin:10px 0 0}
+.tq-resumo{margin:6px 0 10px;padding:10px 12px;border-radius:10px;font-size:13px;line-height:1.5}
+.tq-resumo.ok{background:var(--okbg);color:var(--ok)}
+.tq-resumo.falta{background:var(--warnbg);color:var(--warn)}
+.tq-nao{display:flex;gap:8px;align-items:center;font-size:12.5px;color:var(--ink3)}
+@media(max-width:560px){.tq-par{grid-template-columns:1fr 1fr;gap:8px}}
 </style>
 </head>
 <body class="booting">
@@ -1543,13 +1558,13 @@ const MESES_PEND=new Map();            // listas de mês com gravação marcada,
 const ENVIOS=new Map();                // marca do arquivo -> envio em andamento (o mesmo arquivo nunca sobe duas vezes ao mesmo tempo)
 
 const BUCKET='anivercut';
-let LIMITE_ARMAZENAMENTO=1024*1048576;       // plano gratuito: 1 GB de arquivos. Ajustável em Supabase → Limite do plano
+let LIMITE_ARMAZENAMENTO=976*1048576;       // plano gratuito: "1 GB", que o painel do Supabase mostra como 976 MB. Ajustável em Supabase → Limite do plano
 try{ const g=parseFloat(localStorage.getItem('anivercut-plano-gb')); if(g>0&&g<=100000) LIMITE_ARMAZENAMENTO=Math.round(g*1024)*1048576; }catch(e){}
 function definirPlano(){
   const atual=Math.round(LIMITE_ARMAZENAMENTO/1073741824*100)/100;
   dialog('Limite de armazenamento do plano',
-    `<p style="margin:0 0 10px">O app confere, antes de enviar uma pasta, se as fotos cabem no espaço livre. Informe quanto o seu plano do Supabase oferece para <b>arquivos</b>, em GB. O plano gratuito tem 1 GB; o valor do seu plano aparece no painel do Supabase, em Usage.</p>
-     <label style="display:flex;gap:8px;align-items:center"><input id="planoGb" type="number" min="1" step="1" value="${atual}" style="width:120px"> GB</label>`,
+    `<p style="margin:0 0 10px">O app confere, antes de enviar uma pasta, se as fotos cabem no espaço livre. Informe quanto o seu plano do Supabase oferece para <b>arquivos</b>, em GB. O plano gratuito tem 1 GB (o painel do Supabase mostra 976 MB); o valor do seu plano aparece em Usage.</p>
+     <label style="display:flex;gap:8px;align-items:center"><input id="planoGb" type="number" min="0.1" step="0.05" value="${atual}" style="width:120px"> GB</label>`,
     [{label:'Cancelar'},{label:'Salvar',primary:true,onClick:b=>{
       const v=parseFloat(b.querySelector('#planoGb').value);
       if(!(v>0)){ toast('Informe um número maior que zero.',3000); return false; }
@@ -1566,7 +1581,7 @@ const LER=1000;
 const CAMINHO={people:'pessoas',photos:'fotos',months:'meses',models:'modelos'};
 const chaveDe=(store,v)=>store==='months'?v.key:v.id;
 const TAB={pessoas:{t:'pessoas',pk:'id'},fotos:{t:'fotos',pk:'id'},meses:{t:'meses',pk:'chave'},modelos:{t:'modelos',pk:'id'}};
-const semBlob=o=>{ const c=Object.assign({},o); delete c.blob; delete c.blobNuvem; delete c.__pequena; return c; };
+const semBlob=o=>{ const c=Object.assign({},o); delete c.blob; delete c.blobNuvem; delete c.__pequena; delete c.__comprimida; return c; };
 const esperar=ms=>new Promise(r=>setTimeout(r,ms));
 const mb=n=>(n/1048576).toFixed(n>=10485760?0:1)+' MB';
 const ehCota=e=>!!e&&(e.code==='quota_or_state'||/quota|exhaust/i.test(e.message||''));
@@ -1983,8 +1998,8 @@ async function gravarFoto(ph){
     if(NUVEM.limiteArquivo&&blob.size>=NUVEM.limiteArquivo){ const e=new Error('arquivo de '+mb(blob.size)+' acima do limite por arquivo do bucket'); e.tipo='limite'; throw e; }
     if(!marca) marca=await digital(blob);
     // este mesmo arquivo original já foi enviado por outra foto? reaproveita, sem reenviar e sem alterar
-    const igual=marca&&[...MEM.photos.values()].find(o=>o.id!==ph.id&&o.marca===marca&&o.anexo&&o.orig===true);
-    if(igual){ anexo=igual.anexo; orig=true; }
+    const igual=marca&&[...MEM.photos.values()].find(o=>o.id!==ph.id&&o.marca===marca&&o.anexo&&(o.orig===true||(o.pipe||0)>=2));
+    if(igual){ anexo=igual.anexo; orig=igual.orig===true; }
     else{
       if(NUVEM.cheio){ const e=new Error('armazenamento do Supabase cheio'); e.code='quota_or_state'; e.tipo='espaco'; throw e; }
       let envio=marca?ENVIOS.get(marca):null;          // outra foto está enviando este mesmo arquivo agora?
@@ -1995,10 +2010,10 @@ async function gravarFoto(ph){
         })();
         if(marca){ ENVIOS.set(marca,envio); envio.then(()=>ENVIOS.delete(marca),()=>ENVIOS.delete(marca)); }
       }
-      anexo=await envio; orig=true;
+      anexo=await envio; orig=!ph.__comprimida;           // original exato, ou comprimido pelo app
     }
   }
-  const doc=semBlob(ph); doc.anexo=anexo; doc.url=anexo?urlDeAnexo(anexo):null; doc.marca=marca; doc.orig=orig; doc.rev=marcarRev();
+  const doc=semBlob(ph); doc.anexo=anexo; doc.url=anexo?urlDeAnexo(anexo):null; doc.marca=marca; doc.orig=orig; if(blob) doc.pipe=2; doc.rev=marcarRev();
   await emVoo(()=>comRetentativa(()=>NUVEM.db.doc('fotos/'+ph.id).set(doc)),'fotos/'+ph.id);
   guardarNaMemoria('photos',doc);                  // o arquivo (vários MB) não fica na memória
   return doc;
@@ -3094,12 +3109,12 @@ function dimensoesDe(blob){                 // tamanho original (já com a rota�
     im.src=url;
   });
 }
-async function decodeReduzida(blob,lado){
+async function decodeReduzida(blob,lado,qual){
   const dims=await dimensoesDe(blob);
   if(!dims||typeof createImageBitmap!=='function'||Math.max(dims.w,dims.h)<=lado) return {img:await decodeBlob(blob),dims:null};
   const k=lado/Math.max(dims.w,dims.h);
   try{
-    const img=await createImageBitmap(blob,{resizeWidth:Math.max(1,Math.round(dims.w*k)),resizeHeight:Math.max(1,Math.round(dims.h*k)),resizeQuality:'medium'});
+    const img=await createImageBitmap(blob,{resizeWidth:Math.max(1,Math.round(dims.w*k)),resizeHeight:Math.max(1,Math.round(dims.h*k)),resizeQuality:qual||'medium'});
     return {img,dims};
   }catch(e){ return {img:await decodeBlob(blob),dims:null}; }
 }
@@ -3119,6 +3134,206 @@ async function analyzeImageEscala(img,dims){
   }
   return a;
 }
+/* ---------------------------------------------------------------------------
+   COMPRESSÃO NA IMPORTAÇÃO
+   O Supabase gratuito guarda 1 GB; foto de câmera tem 10 a 15 MB. Cada foto é reduzida antes
+   do envio, SEM diferença visível na arte:
+   - a arte mostra o rosto com cerca de 122 px; a foto guardada mantém o rosto com 3 vezes isso
+     (folga para o zoom do ajuste manual), entre 2400 e 4000 px no lado maior;
+   - JPEG qualidade 90; foto sem rosto detectado vai com 3000 px;
+   - foto que já é pequena e leve fica EXATAMENTE como veio (mesmos bytes);
+   - nenhum arquivo passa de 4,5 MB, então o limite de 5 MB do bucket padrão nunca é problema.
+   O original continua na pasta do usuário: nada é apagado de lá.
+   --------------------------------------------------------------------------- */
+const COMP={faceNaArte:122,folga:3,ladoMin:2400,ladoMax:4000,ladoSemRosto:3000,qualidade:0.9,
+            maxEnvio:4.5*1048576,reencodarAcima:3*1048576};
+
+function planoDeCompressao(a,d,bytes){
+  const longo=Math.max(d.w,d.h);
+  let alvo=COMP.ladoSemRosto, rosto=false;
+  if(a&&a.ok&&a.faceW>0&&a.iw>0){
+    const frac=a.faceW/a.iw;                                   // largura do rosto em relação à da foto
+    alvo=Math.round(COMP.faceNaArte*COMP.folga/frac*(longo/d.w));
+    rosto=true;
+  }
+  alvo=Math.max(COMP.ladoMin,Math.min(COMP.ladoMax,alvo));
+  if(longo<=alvo){                                             // já cabe nas dimensões
+    if(bytes>COMP.reencodarAcima) return {manter:false,lado:longo,rosto,motivo:'peso'};   // mas é pesada demais
+    return {manter:true,lado:longo,rosto};                     // pequena e leve: fica exatamente como veio
+  }
+  return {manter:false,lado:alvo,rosto};
+}
+async function _jpeg(img,w,h,q){
+  const cv=document.createElement('canvas'); cv.width=w; cv.height=h;
+  const g=cv.getContext('2d');
+  g.fillStyle='#fff'; g.fillRect(0,0,w,h);                      // PNG com transparência não vira preto
+  g.imageSmoothingEnabled=true; g.imageSmoothingQuality='high';
+  g.drawImage(img,0,0,w,h);
+  const blob=await new Promise(r=>cv.toBlob(r,'image/jpeg',q));
+  cv.width=cv.height=0;
+  return blob;
+}
+/* img: a foto já decodificada (no máximo 4000 px); d: as dimensões da ORIGINAL. Nunca amplia. */
+async function comprimirParaEnvio(img,d,plano){
+  const iw=img.width||img.naturalWidth, ih=img.height||img.naturalHeight;
+  const k=Math.min(1,plano.lado/Math.max(d.w,d.h));
+  let w=Math.max(1,Math.round(d.w*k)), h=Math.max(1,Math.round(d.h*k));
+  if(w>iw||h>ih){ w=iw; h=ih; }
+  let blob=null;
+  for(let t=0;t<6;t++){
+    blob=await _jpeg(img,w,h,COMP.qualidade);
+    if(!blob||blob.size<=COMP.maxEnvio) break;
+    w=Math.round(w*0.88); h=Math.round(h*0.88);                  // ainda pesada: reduz um pouco e tenta de novo
+  }
+  return blob;
+}
+/* O servidor recusou o tamanho: comprime este arquivo um pouco mais, até caber. */
+async function reencolherAte(blob,alvoBytes){
+  let img=null; try{ img=await decodeBlob(blob); }catch(e){ return null; }
+  let w=img.width||img.naturalWidth, h=img.height||img.naturalHeight, melhor=null;
+  for(let i=0;i<6;i++){
+    w=Math.round(w*0.85); h=Math.round(h*0.85);
+    if(Math.min(w,h)<600) break;
+    const b=await _jpeg(img,w,h,COMP.qualidade-0.02);
+    if(b&&(!melhor||b.size<melhor.size)) melhor=b;
+    if(b&&b.size<=alvoBytes) break;
+  }
+  if(img&&img.close){ try{ img.close(); }catch(e){} }
+  return melhor;
+}
+async function enviarComTentativas(ph){
+  try{ return await dbPut('photos',ph); }
+  catch(err){
+    if(!(err&&err.tipo==='limite')||!ph.blob) throw err;
+    let erro=err;
+    for(let t=0;t<3&&erro&&erro.tipo==='limite';t++){
+      const alvo=Math.min(ph.blob.size,NUVEM.limiteArquivo||ph.blob.size)*0.85;
+      const menor=await reencolherAte(ph.blob,alvo);
+      if(!menor||menor.size>=ph.blob.size) break;
+      ph.blob=menor; ph.__comprimida=true;
+      try{ await dbPut('photos',ph); erro=null; }catch(e2){ erro=e2; }
+    }
+    if(erro) throw erro;
+  }
+}
+
+/* ---------- teste de qualidade, antes de enviar ---------- */
+async function analisarAmostra(f){
+  const {img,dims}=await decodeReduzida(f,COMP.ladoMax,'high');
+  try{
+    const d=dims||{w:img.width||img.naturalWidth,h:img.height||img.naturalHeight};
+    const a=await analyzeImageEscala(img,dims);
+    const plano=planoDeCompressao(a,d,f.size);
+    let comp=null;
+    if(!plano.manter){ const b=await comprimirParaEnvio(img,d,plano); if(b&&b.size<f.size*0.95) comp=b; }
+    const frac=(a&&a.ok&&a.faceW>0&&a.iw>0)?a.faceW/a.iw:null;
+    return {f,d,plano,comp,compBytes:comp?comp.size:f.size,frac};
+  }finally{ if(img&&img.close){ try{ img.close(); }catch(e){} } }
+}
+async function amostrasParaTeste(imgs){
+  const ord=[...imgs].sort((x,y)=>y.size-x.size);
+  const n=Math.min(6,ord.length), escolhidas=[];
+  for(let i=0;i<n;i++){ const f=ord[n===1?0:Math.round(i*(ord.length-1)/(n-1))]; if(!escolhidas.includes(f)) escolhidas.push(f); }
+  const lista=[];
+  for(const f of escolhidas){ try{ lista.push(await analisarAmostra(f)); }catch(e){} }
+  return lista;
+}
+function estimarEnvio(imgs,am){
+  const comp=am.filter(s=>s.comp);
+  const razao=comp.length?comp.reduce((n,s)=>n+s.compBytes,0)/comp.reduce((n,s)=>n+s.f.size,0):1;
+  let total=0, original=0, nComp=0;
+  for(const f of imgs){
+    original+=f.size;
+    if(comp.length&&f.size>1.2*1048576){ total+=Math.min(f.size,f.size*razao); nComp++; } else total+=f.size;
+  }
+  return {original,total:Math.round(total),nComp,razao};
+}
+/* Desenha a arte de verdade com a original e com a comprimida e mede a diferença. */
+async function compararAmostra(s){
+  await ensureArt();
+  const {img:imgO,dims}=await decodeReduzida(s.f,COMP.ladoMax,'high');
+  let imgC=null;
+  try{
+    const aO=await analyzeImageEscala(imgO,dims);
+    imgC=await decodeBlob(s.comp);                                // a comprimida, como ficaria guardada
+    let m=null; try{ m=chapeleiroModel(imgO,aO); }catch(e){}
+    const e={id:'_teste',name:'Nome Sobrenome',day:15,month:11,framing:null,hat:null,giro:0};
+    if(m&&m.faceW){ e.giro=m.giro||0; e.framing=chapeleiroFraming(m,aO); e.hat=chapeleiroHat(m,e.framing); }
+    else{ e.framing=autoFraming(aO); e.hat=autoHat(aO,e.framing); }
+    const gira=im=>e.giro?_girar(im,e.giro):im;
+    const cv=document.createElement('canvas'); cv.width=W; cv.height=H;
+    const g=cv.getContext('2d'), recorte={x:CX-R-6,y:CY-R-92,w:2*R+12,h:2*R+104};
+    const previa=()=>{ const p=document.createElement('canvas'); p.width=236; p.height=Math.round(236*recorte.h/recorte.w);
+      p.getContext('2d').drawImage(cv,recorte.x,recorte.y,recorte.w,recorte.h,0,0,p.width,p.height); return p; };
+    const S=Math.floor(2*R), X0=Math.round(CX-R), Y0=Math.round(CY-R);      // CX, CY e R da arte são fracionários
+    renderArt(g,e,gira(imgO)); const pA=previa(); const dA=g.getImageData(X0,Y0,S,S).data;
+    renderArt(g,e,gira(imgC)); const pB=previa(); const dB=g.getImageData(X0,Y0,S,S).data;
+    let soma=0,n=0;
+    for(let y=0;y<S;y++) for(let x=0;x<S;x++){
+      if((x-S/2)*(x-S/2)+(y-S/2)*(y-S/2)>(S/2)*(S/2)) continue;                // só dentro do círculo da foto
+      const k=(y*S+x)*4; soma+=Math.abs(dA[k]-dB[k])+Math.abs(dA[k+1]-dB[k+1])+Math.abs(dA[k+2]-dB[k+2]); n+=3;
+    }
+    const dif=n?soma/n:NaN;
+    return {pA,pB,dif:isFinite(dif)?dif:null,usouModelo:!!(m&&m.faceW)};
+  }finally{
+    if(imgO&&imgO.close){ try{ imgO.close(); }catch(e){} }
+    if(imgC&&imgC.close){ try{ imgC.close(); }catch(e){} }
+  }
+}
+const rotuloDif=d=>d<2?'praticamente idêntica':d<4?'diferença muito pequena':'diferença perceptível';
+function escolherParaMostrar(am){
+  const comp=am.filter(s=>s.comp), out=[];
+  const poe=s=>{ if(s&&!out.includes(s)) out.push(s); };
+  poe([...comp].filter(s=>s.frac).sort((a,b)=>a.frac-b.frac)[0]);        // pior caso: o menor rosto na foto
+  poe([...comp].sort((a,b)=>b.f.size-a.f.size)[0]);                       // a mais pesada
+  poe([...comp].sort((a,b)=>a.f.size-b.f.size)[Math.floor(comp.length/2)]); // uma do meio
+  for(const s of comp){ if(out.length>=3) break; poe(s); }
+  return out.slice(0,3);
+}
+/* Devolve true para enviar. Mostra a comparação e a conta de espaço. */
+async function dialogTesteDeQualidade(imgs,am,est,livre,mostrar){
+  const cabe=!(livre<Infinity&&est.total>livre);
+  const escolhidas=escolherParaMostrar(am);
+  busy(true,'Preparando o teste de qualidade…',.5);
+  const comps=[];
+  try{ for(const s of escolhidas){ try{ comps.push(await compararAmostra(s)); }catch(e){ comps.push(null); } } }
+  finally{ busy(false); }
+  const linhas=escolhidas.map((s,i)=>{
+    const c=comps[i];
+    const dim=`${s.d.w}×${s.d.h} → ${s.plano.lado>=Math.max(s.d.w,s.d.h)?'mesmo tamanho':Math.round(s.d.w*Math.min(1,s.plano.lado/Math.max(s.d.w,s.d.h)))+'×'+Math.round(s.d.h*Math.min(1,s.plano.lado/Math.max(s.d.w,s.d.h)))}`;
+    const rosto=s.frac?`rosto com ${Math.round(s.frac*100)}% da largura`:'rosto não detectado (3000 px)';
+    return `<div class="tq-item"><div class="tq-par">
+        <figure><div class="tq-slot" data-slot="${i}A"></div><figcaption>Original<br><b>${esc(mb(s.f.size))}</b></figcaption></figure>
+        <figure><div class="tq-slot" data-slot="${i}B"></div><figcaption>Comprimida<br><b>${esc(mb(s.compBytes))}</b></figcaption></figure></div>
+      <p class="mini">${esc(s.f.name)} · ${esc(dim)} · ${esc(rosto)}${c&&c.dif!==null?` · <b>diferença média ${c.dif.toFixed(1)} de 255: ${rotuloDif(c.dif)}</b>`:''}</p></div>`;
+  }).join('');
+  const resumo=`<p class="tq-resumo ${cabe?'ok':'falta'}"><b>Esta pasta:</b> ${imgs.length} foto(s), ${esc(mb(est.original))}. Comprimidas, ocupam cerca de <b>${esc(mb(est.total))}</b>.
+      ${livre<Infinity?`Livre no Supabase: <b>${esc(mb(livre))}</b> — ${cabe?'cabe.':'<b>não cabe tudo</b>: o envio vai até onde couber.'}`:''}</p>`;
+  const intro=mostrar?`<p style="margin:0 0 10px">As fotos são comprimidas antes de ir para o Supabase (JPEG, com o tamanho ajustado pelo rosto). Veja a arte com a original e com a comprimida, em ${escolhidas.length} foto(s) desta pasta:</p>`:'';
+  return await new Promise(res=>{
+    const d=dialog('Teste de qualidade',
+      `${intro}${resumo}${mostrar?`<div class="tq-lista">${linhas}</div>`:''}
+       <label class="tq-nao"><input type="checkbox" id="tqNao" style="width:auto"> Não mostrar este teste nas próximas importações</label>`,
+      [{label:'Cancelar',onClick:()=>res(false)},
+       {label:cabe?'Enviar comprimidas':'Enviar até onde couber',primary:true,onClick:b=>{
+          const c=b.querySelector('#tqNao'); if(c&&c.checked){ try{ localStorage.setItem('anivercut-teste-qualidade','off'); }catch(e){} }
+          res(true);
+       }}]);
+    d.classList.add('dlg-medio');
+    escolhidas.forEach((s,i)=>{
+      const c=comps[i]; if(!c) return;
+      const a=d.querySelector(`[data-slot="${i}A"]`), b=d.querySelector(`[data-slot="${i}B"]`);
+      if(a) a.appendChild(c.pA); if(b) b.appendChild(c.pB);
+    });
+    d.addEventListener('close',()=>{ d.classList.remove('dlg-medio'); res(false); },{once:true});
+  });
+}
+function alternarTesteDeQualidade(){
+  const desligado=localStorage.getItem('anivercut-teste-qualidade')==='off';
+  try{ if(desligado) localStorage.removeItem('anivercut-teste-qualidade'); else localStorage.setItem('anivercut-teste-qualidade','off'); }catch(e){}
+  toast(desligado?'Teste de qualidade ligado: aparece antes de cada importação.':'Teste de qualidade desligado.',3800);
+}
+
 async function importPhotos(files,opts){
   opts=opts||{};
   const todos=[...files];
@@ -3132,37 +3347,33 @@ async function importPhotos(files,opts){
   let livre=Infinity;
   if(NUVEM.ligado){
     const u0=await usoRapido();
-    if(u0&&u0.limite){ NUVEM.cheio=u0.usado>=u0.limite*0.985; livre=Math.max(0,u0.limite-u0.usado); nuvemRepouso(); }
-    const maior=imgs.reduce((m,f)=>Math.max(m,f.size),0);
-    if(maior>4.5*1048576){
-      busy(true,'Conferindo o limite de tamanho de arquivo do Supabase…',.1);
-      const sonda=await sondarLimiteDoArquivo(maior);
-      busy(false);
-      if(!sonda.ok&&sonda.tipo==='limite'){
-        const escolha=await dialogLimiteDoBucket(maior);
-        if(escolha!=='menores'){ return rep; }
-        NUVEM.limiteArquivo=Math.min(NUVEM.limiteArquivo||Infinity,5*1048576);       // o padrão do schema; o app ajusta se for outro
-      }
-    }
-    const total=imgs.reduce((n,f)=>n+f.size,0);
-    if(livre<Infinity&&total>livre){
-      const media=total/imgs.length, cabem=Math.floor(livre/media);
-      if(!await ask(`Esta pasta tem ${imgs.length} foto(s) com ${mb(total)} no total, e o Supabase tem ${mb(livre)} livres. Devem caber cerca de ${cabem} foto(s). Enviar até encher? As demais não são enviadas, e o que já foi enviado fica salvo.`,'Enviar até encher','Espaço no Supabase')){ return rep; }
+    if(u0&&u0.limite){ NUVEM.cheio=(u0.limite-u0.usado)<300*1024; livre=Math.max(0,u0.limite-u0.usado); nuvemRepouso(); }
+    busy(true,'Preparando o teste de qualidade…',.1);
+    let am=[];
+    try{ am=await amostrasParaTeste(imgs); }catch(e){}
+    busy(false);
+    const est=estimarEnvio(imgs,am);
+    const naoCabe=livre<Infinity&&est.total>livre;
+    if(am.some(s=>s.comp)){
+      const mostrar=localStorage.getItem('anivercut-teste-qualidade')!=='off';
+      if(mostrar||naoCabe){ if(!await dialogTesteDeQualidade(imgs,am,est,livre,mostrar)) return rep; }
+    } else if(naoCabe){
+      if(!await ask(`Esta pasta tem ${imgs.length} foto(s) com ${mb(est.total)} no total, e o Supabase tem ${mb(livre)} livres. Enviar até onde couber?`,'Enviar','Espaço no Supabase')) return rep;
     }
   }
   busy(true,'Enviando as fotos…',0);
   // índice leve do que já está cadastrado (uma passada só), em vez de clonar o cadastro a cada arquivo
   const idx=new Map();
-  for(const p of MEM.photos.values()){ let l=idx.get(p.personId); if(!l) idx.set(p.personId,l=[]); l.push({id:p.id,fileName:p.fileName,size:p.size,orig:p.orig===true,marca:p.marca||null}); }
+  for(const p of MEM.photos.values()){ let l=idx.get(p.personId); if(!l) idx.set(p.personId,l=[]); l.push({id:p.id,fileName:p.fileName,size:p.size,pronta:(p.orig===true||(p.pipe||0)>=2),marca:p.marca||null}); }
   const ativos=new Set(), jaNesta=new Set();
   const naFila=async job=>{ while(ativos.size>=4) await Promise.race(ativos); const p=job().finally(()=>ativos.delete(p)); ativos.add(p); };
   const adiante=new Map();
-  const preparar=j=>{ if(j<imgs.length&&!adiante.has(j)) adiante.set(j,decodeReduzida(imgs[j],1600).then(r=>r,e=>({erro:e}))); };
+  const preparar=j=>{ if(j<imgs.length&&!adiante.has(j)) adiante.set(j,decodeReduzida(imgs[j],COMP.ladoMax,'high').then(r=>r,e=>({erro:e}))); };
   for(let i=0;i<imgs.length;i++){
     const f=imgs[i];
     busy(true,`Enviando as fotos… ${i+1}/${imgs.length}`,(i+1)/imgs.length);
     // sem espaço ou acima do limite do bucket: nem decodifica, só registra (e solta o que já foi decodificado)
-    const semLugar=NUVEM.cheio||f.size>livre?'espaco':((NUVEM.limiteArquivo&&f.size>=NUVEM.limiteArquivo)?'limite':null);
+    const semLugar=(NUVEM.cheio||livre<300*1024)?'espaco':null;
     if(semLugar){
       const pre=adiante.get(i); if(pre){ adiante.delete(i); pre.then(r=>{ if(r&&r.img&&r.img.close){ try{ r.img.close(); }catch(e){} } }); }
       rep.falhas.push({nome:f.name,tipo:semLugar,motivo:semLugar==='espaco'?'armazenamento do Supabase cheio':'acima do limite por arquivo do bucket'});
@@ -3173,7 +3384,7 @@ async function importPhotos(files,opts){
       const det0=nomeDoArquivo(f);
       if(det0&&det0.nome){
         const d0=decidirPessoa(det0.nome);
-        const ja=d0.tipo==='certo'&&(idx.get(d0.person.id)||[]).find(e=>e.fileName===f.name&&e.size===f.size&&e.orig);
+        const ja=d0.tipo==='certo'&&(idx.get(d0.person.id)||[]).find(e=>e.fileName===f.name&&e.size===f.size&&e.pronta);
         if(ja){
           const pre=adiante.get(i); if(pre){ adiante.delete(i); pre.then(r=>{ if(r&&r.img&&r.img.close){ try{ r.img.close(); }catch(e){} } }); }
           rep.dup++; continue;
@@ -3182,7 +3393,7 @@ async function importPhotos(files,opts){
     }
     let img=null, dims=null;
     try{
-      for(let k=0;k<=3;k++) preparar(i+k);                          // as próximas já vão sendo decodificadas
+      for(let k=0;k<=2;k++) preparar(i+k);                          // as próximas já vão sendo decodificadas
       const lido=await adiante.get(i); adiante.delete(i);
       if(lido.erro) throw lido.erro;                                // se não abrir, o arquivo é reportado
       ({img,dims}=lido);
@@ -3213,31 +3424,38 @@ async function importPhotos(files,opts){
       // a mesma foto = mesmo nome e tamanho, OU mesmo conteúdo (pega também cópia com outro nome)
       const igual=existentes.find(e=>(e.fileName===f.name&&e.size===f.size)||(marcaF&&e.marca===marcaF));
       // já cadastrada com o arquivo ORIGINAL (ou repetida nesta mesma leva): nada a fazer
-      if(jaNesta.has(chaveDup)||(chaveMarca&&jaNesta.has(chaveMarca))||(igual&&igual.orig===true)){ rep.dup++; continue; }
+      if(jaNesta.has(chaveDup)||(chaveMarca&&jaNesta.has(chaveMarca))||(igual&&igual.pronta)){ rep.dup++; continue; }
       jaNesta.add(chaveDup); if(chaveMarca) jaNesta.add(chaveMarca);
       // já cadastrada, mas com um arquivo reduzido de versões antigas: troca pelo original e mantém o cadastro
       const trocando=igual?await dbGet('photos',igual.id):null, velhoAnexo=trocando?trocando.anexo:null;
       const id=trocando?trocando.id:((opts.ids&&opts.ids.get(f))||uid());
       const analysis=await analyzeImageEscala(img,dims);
+      // tamanho decidido pelo rosto; foto pequena e leve fica exatamente como veio
+      const dOrig=dims||{w:img.width||img.naturalWidth,h:img.height||img.naturalHeight};
+      const plano=planoDeCompressao(analysis,dOrig,f.size);
+      let envio=f;
+      if(!plano.manter){ const c=await comprimirParaEnvio(img,dOrig,plano); if(c&&c.size<f.size*0.95) envio=c; }
+      if(envio.size>livre){ rep.falhas.push({nome:f.name,tipo:'espaco',motivo:'armazenamento do Supabase cheio'}); continue; }
       const novos={id,personId,fileName:f.name,size:f.size,type:mimeDe(f)||f.type||'',
-                rel:f.webkitRelativePath||'',blob:f,marca:marcaF,pending:pend,thumb:makeThumb(img,140),analysis};
+                rel:f.webkitRelativePath||'',blob:envio,__comprimida:envio!==f,marca:marcaF,pending:pend,thumb:makeThumb(img,140),analysis};
       const ph=trocando?Object.assign({},trocando,novos,{anexo:null,url:null,marca:marcaF,orig:false,chapeleiro:undefined,chapeleiroV:undefined,pending:trocando.pending}):novos;
-      livre-=f.size;                                                  // reserva o espaço desta foto
+      livre-=envio.size;                                                  // reserva o espaço desta foto
       await naFila(async()=>{                                       // o envio corre junto com a análise da próxima
         try{
-          await dbPut('photos',ph);                                  // sobe o arquivo exatamente como veio
+          await enviarComTentativas(ph);                              // sobe comprimida (ou exata, se já era pequena)
+          { const tam=ph.blob?ph.blob.size:f.size; rep.bytesOrig=(rep.bytesOrig||0)+f.size; rep.bytesEnvio=(rep.bytesEnvio||0)+tam; if(ph.__comprimida||tam<f.size) rep.comprimidas=(rep.comprimidas||0)+1; }
           if(trocando){
             rep.trocadas=(rep.trocadas||0)+1;
             await liberarArquivoSeSolto(velhoAnexo);
             state.imgCache.delete(id); BLOBS.delete(id);
-            igual.orig=true;
+            igual.pronta=true;
           } else {
             rep.importadas++;
-            { let l=idx.get(personId); if(!l) idx.set(personId,l=[]); l.push({id,fileName:f.name,size:f.size,orig:true,marca:marcaF}); }
+            { let l=idx.get(personId); if(!l) idx.set(personId,l=[]); l.push({id,fileName:f.name,size:f.size,pronta:true,marca:marcaF}); }
             if(personId===PENDING){ if(pend&&pend.sug.length) rep.revisar++; else if(pend&&pend.nome) rep.novosNomes=(rep.novosNomes||0)+1; else rep.semDono++; }
             else rep.pessoas.add(personId);
           }
-        }catch(err){ livre+=f.size; rep.falhas.push({nome:f.name,tipo:(err&&err.tipo)||'outro',motivo:(err&&err.message)||'não foi possível enviar'}); }
+        }catch(err){ livre+=envio.size; rep.falhas.push({nome:f.name,tipo:(err&&err.tipo)||'outro',motivo:(err&&err.message)||'não foi possível enviar'}); }
       });
     }catch(err){ rep.falhas.push({nome:f.name,tipo:'leitura',motivo:(err&&err.message)||'não foi possível ler'}); }
     finally{ if(img&&img.close){ try{ img.close(); }catch(e){} } }
@@ -3263,7 +3481,8 @@ function showReport(r){
   const li=(ic,txt,cls)=>`<div class="rep ${cls||''}"><b>${ic}</b><span>${txt}</span></div>`;
   let h='';
   h+=li('OK',`${r.importadas} foto(s) identificada(s) e importada(s)`,'ok');
-  if(r.trocadas) h+=li('OK',`${r.trocadas} foto(s) que já estavam cadastradas tiveram o arquivo trocado pelo original, na qualidade exata`,'ok');
+  if(r.comprimidas) h+=li('OK',`${r.comprimidas} foto(s) comprimida(s) antes do envio: de ${mb(r.bytesOrig)} para ${mb(r.bytesEnvio)} (economia de ${mb(r.bytesOrig-r.bytesEnvio)})`,'ok');
+  if(r.trocadas) h+=li('OK',`${r.trocadas} foto(s) que já estavam cadastradas com um arquivo antigo e reduzido foram atualizadas`,'ok');
   h+=li('OK',`${r.pessoas.size} colaborador(es) encontrado(s)`+(r.novas.size?` · ${r.novas.size} cadastrado(s) agora`:''),'ok');
   if(r.revisar) h+=li('!',`${r.revisar} foto(s) precisam de confirmação`,'warn');
   if(r.novosNomes) h+=li('!',`${r.novosNomes} nome(s) novo(s) aguardando sua confirmação para virar colaborador`,'warn');
@@ -4367,6 +4586,7 @@ function htmlPainelBase(u,est){
         <button type="button" class="btn sm" id="bpMelhor">Manter só a melhor foto</button>
         <button type="button" class="btn sm" id="bpMemoria">Limpar memória do app</button>
         <button type="button" class="btn sm ghost" id="bpPlano">Limite do plano</button>
+        <button type="button" class="btn sm ghost" id="bpTeste">${localStorage.getItem('anivercut-teste-qualidade')==='off'?'Ligar':'Desligar'} teste de qualidade</button>
         <button type="button" class="btn sm ghost" id="bpRecuperar">Recuperar cópia antiga</button>
       </div>`
     :`<p class="mini" style="margin:0">O Supabase não está disponível agora. Sem ele o app não mostra nem salva o cadastro.</p>`;
@@ -4393,6 +4613,7 @@ $('#btnEspaco').onclick=async()=>{
   liga('#bpMelhor',()=>liberarEspaco());
   liga('#bpRecuperar',()=>recuperarCopiaAntiga());
   liga('#bpPlano',()=>definirPlano());
+  liga('#bpTeste',()=>alternarTesteDeQualidade());
   liga('#bpMemoria',()=>{
     state.imgCache.clear(); _retas.clear(); state.blobs.clear(); state.thumbs.clear(); BLOBS.clear();
     toast('Memória do app liberada.',2600);
