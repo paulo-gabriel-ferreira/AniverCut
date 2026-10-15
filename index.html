@@ -1457,7 +1457,8 @@ const SUPABASE_ANON_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYm
 
 const NUVEM={db:null,anexos:null,sb:null,cfg:null,ligado:false,podeEscrever:null,
   estado:'ligando',cheio:false,limpando:false,importando:false,ouvindo:false,sincronizando:false,
-  minhas:new Set(),pendentes:0,erroGravacao:null,progresso:'',remBuf:[],escrevendo:new Set(),erroConfig:null};
+  minhas:new Set(),pendentes:0,erroGravacao:null,progresso:'',remBuf:[],escrevendo:new Set(),erroConfig:null,
+  limiteArquivo:null,limiteOk:0};
 const MEM={people:new Map(),photos:new Map(),months:new Map(),models:new Map()};
 /* Arquivos de foto são guardados EXATAMENTE como vieram (vários MB cada). Os que são baixados para
    gerar uma arte ficam num cache com limite de bytes, para a página nunca crescer sem controle. */
@@ -1477,7 +1478,21 @@ const MESES_PEND=new Map();            // listas de mês com gravação marcada,
 const ENVIOS=new Map();                // marca do arquivo -> envio em andamento (o mesmo arquivo nunca sobe duas vezes ao mesmo tempo)
 
 const BUCKET='anivercut';
-const LIMITE_ARMAZENAMENTO=1024*1048576;     // plano gratuito: 1 GB de arquivos
+let LIMITE_ARMAZENAMENTO=1024*1048576;       // plano gratuito: 1 GB de arquivos. Ajustável em Supabase → Limite do plano
+try{ const g=parseFloat(localStorage.getItem('anivercut-plano-gb')); if(g>0&&g<=100000) LIMITE_ARMAZENAMENTO=Math.round(g*1024)*1048576; }catch(e){}
+function definirPlano(){
+  const atual=Math.round(LIMITE_ARMAZENAMENTO/1073741824*100)/100;
+  dialog('Limite de armazenamento do plano',
+    `<p style="margin:0 0 10px">O app confere, antes de enviar uma pasta, se as fotos cabem no espaço livre. Informe quanto o seu plano do Supabase oferece para <b>arquivos</b>, em GB. O plano gratuito tem 1 GB; o valor do seu plano aparece no painel do Supabase, em Usage.</p>
+     <label style="display:flex;gap:8px;align-items:center"><input id="planoGb" type="number" min="1" step="1" value="${atual}" style="width:120px"> GB</label>`,
+    [{label:'Cancelar'},{label:'Salvar',primary:true,onClick:b=>{
+      const v=parseFloat(b.querySelector('#planoGb').value);
+      if(!(v>0)){ toast('Informe um número maior que zero.',3000); return false; }
+      try{ localStorage.setItem('anivercut-plano-gb',String(v)); }catch(e){}
+      LIMITE_ARMAZENAMENTO=Math.round(v*1024)*1048576;
+      toast('Limite do plano: '+v+' GB.',3200);
+    }}]);
+}
 const LIMITE_BANCO=500*1048576;              // plano gratuito: 500 MB de banco
 const EXT_DE={'image/jpeg':'jpg','image/webp':'webp','image/png':'png','image/gif':'gif','image/avif':'avif'};
 const novoId=()=>(window.crypto&&crypto.randomUUID)?crypto.randomUUID():('x'+Date.now().toString(36)+Math.random().toString(36).slice(2,10));
@@ -1518,7 +1533,7 @@ function avisarFalha(e,acao){
   if(e&&typeof e==='object') e.supabase=true;
   NUVEM.erroGravacao=e||true;
   if(ehCota(e)) declararCheio();
-  else if(Date.now()-(avisarFalha._t||0)>4000){
+  else if(!(e&&(e.tipo==='limite'||e.tipo==='espaco'))&&Date.now()-(avisarFalha._t||0)>4000){   // limite/espaço são explicados no relatório
     avisarFalha._t=Date.now();
     toast(`Não consegui ${acao||'salvar'} no Supabase (${(e&&e.message)||'erro'}). A alteração NÃO foi salva.`,8000);
   }
@@ -1834,13 +1849,61 @@ async function dbPut(s,v){
 }
 /* O arquivo da foto sobe EXATAMENTE como veio: mesmos bytes, mesma resolução, mesma qualidade.
    Nada é reduzido nem recomprimido. O campo "orig" marca a foto cujo arquivo está intacto. */
-function erroDeEnvio(e,blob){
+const SQL_LIMITE="update storage.buckets set file_size_limit = 52428800 where id = 'anivercut';";
+/* Uso do armazenamento sem listar os arquivos (uma chamada só). */
+async function usoRapido(){
+  try{
+    const {data,error}=await NUVEM.sb.rpc('uso_base');
+    if(error||!data) return null;
+    return {usado:Number(data.bytes_arquivos)||0,limite:LIMITE_ARMAZENAMENTO,n:Number(data.arquivos)||0};
+  }catch(e){ return null; }
+}
+/* O Supabase responde "arquivo grande demais" (413) tanto quando o BUCKET limita o tamanho de cada
+   arquivo quanto quando o armazenamento todo acabou. São problemas diferentes: o primeiro se resolve
+   com um comando no SQL Editor e não impede arquivos menores; o segundo impede tudo. */
+async function tratarFalhaEnvio(e,blob){
   const msg=(e&&e.message)||'';
-  if(/maximum allowed size|too large|payload|exceed/i.test(msg)||(e&&(e.status===413||String(e.statusCode)==='413'))){
-    const x=new Error('o Supabase recusou o arquivo de '+mb(blob.size)+' (limite do bucket). No SQL Editor, rode: update storage.buckets set file_size_limit = 52428800 where id = \'anivercut\';');
-    x.supabase=true; return x;
+  const tamanho=/maximum allowed size|too large|payload|exceed|413/i.test(msg)||(e&&(e.pg==413||e.pg==='413'));
+  let tipo='outro';
+  if(tamanho||ehCota(e)){
+    let cheio=!tamanho;                                   // erro de cota explícito
+    if(tamanho){ const u=await usoRapido(); cheio=!!(u&&u.limite&&u.usado+blob.size>u.limite*0.995); }
+    tipo=cheio?'espaco':'limite';
   }
-  return e;
+  let x;
+  if(tipo==='espaco'){ declararCheio(); x=new Error('armazenamento do Supabase cheio'); }
+  else if(tipo==='limite'){
+    NUVEM.limiteArquivo=Math.min(NUVEM.limiteArquivo||Infinity,blob.size);
+    x=new Error('arquivo de '+mb(blob.size)+' acima do limite por arquivo do bucket');
+  } else x=e;
+  x.tipo=tipo; x.supabase=true; x.code=(tipo==='outro'&&e&&e.code)||x.code;
+  return x;
+}
+/* Antes de enviar uma pasta inteira: o bucket aceita arquivos do tamanho do maior? Testa com um arquivo
+   de enchimento (apagado em seguida), em vez de descobrir isso foto por foto. */
+async function sondarLimiteDoArquivo(tamanho){
+  if(NUVEM.limiteOk>=tamanho) return {ok:true};
+  const nome='fotos/sonda-'+novoId()+'.png';
+  const st=NUVEM.sb.storage.from(BUCKET);
+  const corpo=new Blob([new Uint8Array(tamanho)],{type:'image/png'});
+  try{
+    const {error}=await st.upload(nome,corpo,{contentType:'image/png',upsert:false});
+    if(!error){ try{ await st.remove([nome]); }catch(x){} NUVEM.limiteOk=tamanho; return {ok:true}; }
+    const x=await tratarFalhaEnvio(er(error),corpo);
+    return {ok:false,tipo:x.tipo};
+  }catch(e){ return {ok:true,incerto:true}; }          // sem rede ou resposta estranha: segue e deixa cada foto decidir
+}
+function dialogLimiteDoBucket(maior){
+  return new Promise(res=>{
+    const d=dialog('O Supabase não aceita arquivos deste tamanho',
+      `<p style="margin:0 0 8px">Há fotos de até <b>${mb(maior)}</b>, mas o limite por arquivo do seu Supabase é menor. Isso se corrige uma vez só: no <b>SQL Editor</b> do Supabase, rode:</p>
+       <pre style="margin:0 0 8px;padding:10px;border-radius:8px;background:var(--bg2,#0001);white-space:pre-wrap;font-size:12.5px">${esc(SQL_LIMITE)}</pre>
+       <p class="mini" style="margin:0">Depois é só importar a pasta de novo. Nada foi enviado ainda.</p>`,
+      [{label:'Copiar comando',onClick:()=>{ try{ navigator.clipboard.writeText(SQL_LIMITE); toast('Comando copiado.',2200); }catch(e){} return false; }},
+       {label:'Enviar só as menores',onClick:()=>res('menores')},
+       {label:'Cancelar',primary:true,onClick:()=>res('cancelar')}]);
+    if(d&&d.addEventListener) d.addEventListener('close',()=>res('cancelar'),{once:true});
+  });
 }
 async function liberarArquivoSeSolto(anexo){
   if(!anexo) return;
@@ -1851,18 +1914,19 @@ async function gravarFoto(ph){
   let anexo=ph.anexo||null, marca=ph.marca||null, orig=ph.orig===true;
   const blob=ph.blob||null;                        // só chega aqui quando há um arquivo NOVO para enviar
   if(blob){
-    if(blob.size>LIMITE_ARQUIVO) throw new Error('o arquivo tem '+mb(blob.size)+' e o Supabase gratuito aceita até '+mb(LIMITE_ARQUIVO));
+    if(blob.size>LIMITE_ARQUIVO){ const e=new Error('o arquivo tem '+mb(blob.size)+' e o Supabase gratuito aceita até '+mb(LIMITE_ARQUIVO)); e.tipo='limite'; throw e; }
+    if(NUVEM.limiteArquivo&&blob.size>=NUVEM.limiteArquivo){ const e=new Error('arquivo de '+mb(blob.size)+' acima do limite por arquivo do bucket'); e.tipo='limite'; throw e; }
     if(!marca) marca=await digital(blob);
     // este mesmo arquivo original já foi enviado por outra foto? reaproveita, sem reenviar e sem alterar
     const igual=marca&&[...MEM.photos.values()].find(o=>o.id!==ph.id&&o.marca===marca&&o.anexo&&o.orig===true);
     if(igual){ anexo=igual.anexo; orig=true; }
     else{
-      if(NUVEM.cheio){ const e=new Error('armazenamento cheio'); e.code='quota_or_state'; throw e; }
+      if(NUVEM.cheio){ const e=new Error('armazenamento do Supabase cheio'); e.code='quota_or_state'; e.tipo='espaco'; throw e; }
       let envio=marca?ENVIOS.get(marca):null;          // outra foto está enviando este mesmo arquivo agora?
       if(!envio){
         envio=(async()=>{
           try{ return (await emVoo(()=>comRetentativa(()=>NUVEM.anexos.upload(blob)))).id; }
-          catch(e){ if(ehCota(e)) declararCheio(); throw erroDeEnvio(e,blob); }
+          catch(e){ throw await tratarFalhaEnvio(e,blob); }
         })();
         if(marca){ ENVIOS.set(marca,envio); envio.then(()=>ENVIOS.delete(marca),()=>ENVIOS.delete(marca)); }
       }
@@ -2998,7 +3062,33 @@ async function importPhotos(files,opts){
              pessoas:new Set(),novas:new Set(),revisar:0,semDono:0,falhas:[]};
   if(!todos.length){ toast('A seleção não trouxe nenhum arquivo. Tente escolher a pasta novamente.',4200); return rep; }
   if(!imgs.length){ showReport(rep); return rep; }
+  /* ---- antes de enviar: o Supabase aceita arquivos deste tamanho? cabem no espaço livre? ---- */
+  NUVEM.erroGravacao=null; NUVEM.limiteArquivo=null; NUVEM.limiteOk=0; nuvemRepouso();
+  let livre=Infinity;
+  if(NUVEM.ligado){
+    const u0=await usoRapido();
+    if(u0&&u0.limite){ NUVEM.cheio=u0.usado>=u0.limite*0.985; livre=Math.max(0,u0.limite-u0.usado); nuvemRepouso(); }
+    const maior=imgs.reduce((m,f)=>Math.max(m,f.size),0);
+    if(maior>4.5*1048576){
+      busy(true,'Conferindo o limite de tamanho de arquivo do Supabase…',.1);
+      const sonda=await sondarLimiteDoArquivo(maior);
+      busy(false);
+      if(!sonda.ok&&sonda.tipo==='limite'){
+        const escolha=await dialogLimiteDoBucket(maior);
+        if(escolha!=='menores'){ return rep; }
+        NUVEM.limiteArquivo=Math.min(NUVEM.limiteArquivo||Infinity,5*1048576);       // o padrão do schema; o app ajusta se for outro
+      }
+    }
+    const total=imgs.reduce((n,f)=>n+f.size,0);
+    if(livre<Infinity&&total>livre){
+      const media=total/imgs.length, cabem=Math.floor(livre/media);
+      if(!await ask(`Esta pasta tem ${imgs.length} foto(s) com ${mb(total)} no total, e o Supabase tem ${mb(livre)} livres. Devem caber cerca de ${cabem} foto(s). Enviar até encher? As demais não são enviadas, e o que já foi enviado fica salvo.`,'Enviar até encher','Espaço no Supabase')){ return rep; }
+    }
+  }
   busy(true,'Enviando as fotos…',0);
+  // índice leve do que já está cadastrado (uma passada só), em vez de clonar o cadastro a cada arquivo
+  const idx=new Map();
+  for(const p of MEM.photos.values()){ let l=idx.get(p.personId); if(!l) idx.set(p.personId,l=[]); l.push({id:p.id,fileName:p.fileName,size:p.size,orig:p.orig===true,marca:p.marca||null}); }
   const ativos=new Set(), jaNesta=new Set();
   const naFila=async job=>{ while(ativos.size>=4) await Promise.race(ativos); const p=job().finally(()=>ativos.delete(p)); ativos.add(p); };
   const adiante=new Map();
@@ -3006,6 +3096,25 @@ async function importPhotos(files,opts){
   for(let i=0;i<imgs.length;i++){
     const f=imgs[i];
     busy(true,`Enviando as fotos… ${i+1}/${imgs.length}`,(i+1)/imgs.length);
+    // sem espaço ou acima do limite do bucket: nem decodifica, só registra (e solta o que já foi decodificado)
+    const semLugar=NUVEM.cheio||f.size>livre?'espaco':((NUVEM.limiteArquivo&&f.size>=NUVEM.limiteArquivo)?'limite':null);
+    if(semLugar){
+      const pre=adiante.get(i); if(pre){ adiante.delete(i); pre.then(r=>{ if(r&&r.img&&r.img.close){ try{ r.img.close(); }catch(e){} } }); }
+      rep.falhas.push({nome:f.name,tipo:semLugar,motivo:semLugar==='espaco'?'armazenamento do Supabase cheio':'acima do limite por arquivo do bucket'});
+      continue;
+    }
+    // já enviada antes com o arquivo ORIGINAL? Reimportar uma pasta é quase instantâneo: nem decodifica.
+    if(!opts.personId&&!(opts.donos&&opts.donos.get(f))){
+      const det0=nomeDoArquivo(f);
+      if(det0&&det0.nome){
+        const d0=decidirPessoa(det0.nome);
+        const ja=d0.tipo==='certo'&&(idx.get(d0.person.id)||[]).find(e=>e.fileName===f.name&&e.size===f.size&&e.orig);
+        if(ja){
+          const pre=adiante.get(i); if(pre){ adiante.delete(i); pre.then(r=>{ if(r&&r.img&&r.img.close){ try{ r.img.close(); }catch(e){} } }); }
+          rep.dup++; continue;
+        }
+      }
+    }
     let img=null, dims=null;
     try{
       for(let k=0;k<=3;k++) preparar(i+k);                          // as próximas já vão sendo decodificadas
@@ -3033,19 +3142,22 @@ async function importPhotos(files,opts){
           else { personId=PENDING; pend={nome:bonito(det.nome),sug:d.tipo==='duvida'?sugestoesDe(d.cands):sugestoesPrimeiroNome(det.nome)}; }
         } else { personId=PENDING; pend={nome:bonito(det.pastaRaiz||''),sug:[]}; }
       }
-      const existentes=await dbByPerson(personId);
-      const chaveDup=personId+'|'+f.name+'|'+f.size;
-      const igual=existentes.find(e=>e.fileName===f.name&&e.size===f.size);
+      const existentes=idx.get(personId)||[];
+      const marcaF=await digital(f);                                   // impressão digital do conteúdo
+      const chaveDup=personId+'|'+f.name+'|'+f.size, chaveMarca=marcaF?personId+'|'+marcaF:null;
+      // a mesma foto = mesmo nome e tamanho, OU mesmo conteúdo (pega também cópia com outro nome)
+      const igual=existentes.find(e=>(e.fileName===f.name&&e.size===f.size)||(marcaF&&e.marca===marcaF));
       // já cadastrada com o arquivo ORIGINAL (ou repetida nesta mesma leva): nada a fazer
-      if(jaNesta.has(chaveDup)||(igual&&igual.orig===true)){ rep.dup++; continue; }
-      jaNesta.add(chaveDup);
+      if(jaNesta.has(chaveDup)||(chaveMarca&&jaNesta.has(chaveMarca))||(igual&&igual.orig===true)){ rep.dup++; continue; }
+      jaNesta.add(chaveDup); if(chaveMarca) jaNesta.add(chaveMarca);
       // já cadastrada, mas com um arquivo reduzido de versões antigas: troca pelo original e mantém o cadastro
-      const trocando=igual||null, velhoAnexo=trocando?trocando.anexo:null;
+      const trocando=igual?await dbGet('photos',igual.id):null, velhoAnexo=trocando?trocando.anexo:null;
       const id=trocando?trocando.id:((opts.ids&&opts.ids.get(f))||uid());
       const analysis=await analyzeImageEscala(img,dims);
       const novos={id,personId,fileName:f.name,size:f.size,type:mimeDe(f)||f.type||'',
-                rel:f.webkitRelativePath||'',blob:f,pending:pend,thumb:makeThumb(img,140),analysis};
-      const ph=trocando?Object.assign({},trocando,novos,{anexo:null,url:null,marca:null,orig:false,chapeleiro:undefined,chapeleiroV:undefined,pending:trocando.pending}):novos;
+                rel:f.webkitRelativePath||'',blob:f,marca:marcaF,pending:pend,thumb:makeThumb(img,140),analysis};
+      const ph=trocando?Object.assign({},trocando,novos,{anexo:null,url:null,marca:marcaF,orig:false,chapeleiro:undefined,chapeleiroV:undefined,pending:trocando.pending}):novos;
+      livre-=f.size;                                                  // reserva o espaço desta foto
       await naFila(async()=>{                                       // o envio corre junto com a análise da próxima
         try{
           await dbPut('photos',ph);                                  // sobe o arquivo exatamente como veio
@@ -3053,20 +3165,29 @@ async function importPhotos(files,opts){
             rep.trocadas=(rep.trocadas||0)+1;
             await liberarArquivoSeSolto(velhoAnexo);
             state.imgCache.delete(id); BLOBS.delete(id);
+            igual.orig=true;
           } else {
             rep.importadas++;
+            { let l=idx.get(personId); if(!l) idx.set(personId,l=[]); l.push({id,fileName:f.name,size:f.size,orig:true,marca:marcaF}); }
             if(personId===PENDING){ if(pend&&pend.sug.length) rep.revisar++; else if(pend&&pend.nome) rep.novosNomes=(rep.novosNomes||0)+1; else rep.semDono++; }
             else rep.pessoas.add(personId);
           }
-        }catch(err){ rep.falhas.push({nome:f.name,motivo:(err&&err.message)||'não foi possível enviar'}); }
+        }catch(err){ livre+=f.size; rep.falhas.push({nome:f.name,tipo:(err&&err.tipo)||'outro',motivo:(err&&err.message)||'não foi possível enviar'}); }
       });
-    }catch(err){ rep.falhas.push({nome:f.name,motivo:(err&&err.message)||'não foi possível ler'}); }
+    }catch(err){ rep.falhas.push({nome:f.name,tipo:'leitura',motivo:(err&&err.message)||'não foi possível ler'}); }
     finally{ if(img&&img.close){ try{ img.close(); }catch(e){} } }
     if(i%3===2) await new Promise(r=>setTimeout(r,0));
   }
   busy(true,'Enviando as últimas fotos…',1);
   await Promise.all(ativos);
   busy(false);
+  NUVEM.erroGravacao=null; nuvemRepouso();               // as falhas desta importação ficam no relatório, não no indicador
+  // Colaborador CRIADO por esta importação cujas fotos falharam todas não fica no cadastro, vazio:
+  // ao importar de novo, o nome é recriado junto com as fotos.
+  for(const pid of [...rep.novas]){
+    if([...MEM.photos.values()].some(f=>f.personId===pid)) continue;
+    try{ await dbDelVarios('people',[pid]); rep.novas.delete(pid); rep.desfeitos=(rep.desfeitos||0)+1; }catch(e){}
+  }
   await reloadPeople();
   renderPeople(); renderMonth();
   showReport(rep);
@@ -3082,11 +3203,17 @@ function showReport(r){
   if(r.revisar) h+=li('!',`${r.revisar} foto(s) precisam de confirmação`,'warn');
   if(r.novosNomes) h+=li('!',`${r.novosNomes} nome(s) novo(s) aguardando sua confirmação para virar colaborador`,'warn');
   if(r.semDono) h+=li('X',`${r.semDono} arquivo(s) não puderam ser associados`,'err');
-  if(r.falhas.length) h+=li('X',`${r.falhas.length} arquivo(s) não puderam ser lidos`,'err');
+  const fEsp=r.falhas.filter(x=>x.tipo==='espaco'), fLim=r.falhas.filter(x=>x.tipo==='limite'), fOut=r.falhas.filter(x=>x.tipo!=='espaco'&&x.tipo!=='limite');
+  if(fEsp.length) h+=li('X',`${fEsp.length} foto(s) não enviadas: o armazenamento do Supabase ficou cheio`,'err');
+  if(fLim.length) h+=li('X',`${fLim.length} foto(s) acima do limite por arquivo do Supabase`,'err');
+  if(fOut.length) h+=li('X',`${fOut.length} arquivo(s) não puderam ser importados`,'err');
+  if(r.desfeitos) h+=li('—',`${r.desfeitos} colaborador(es) que seriam criados foram desfeitos, porque nenhuma foto deles foi enviada`,'mut');
   if(r.dup) h+=li('—',`${r.dup} já estavam cadastradas`,'mut');
   if(r.naoImagem) h+=li('—',`${r.naoImagem} arquivo(s) ignorado(s) por não serem imagem`,'mut');
-  if(r.falhas.length){
-    h+='<div class="faillist">'+r.falhas.slice(0,30).map(x=>`${esc(x.nome)} — ${esc(x.motivo)}`).join('<br>')+'</div>';
+  if(fEsp.length) h+=`<p class="mini" style="margin:8px 0 0">O que já foi enviado ficou salvo. Para continuar: libere espaço (Supabase → Manter só a melhor foto) ou use um plano com mais armazenamento, e importe a pasta de novo: as fotos já enviadas são puladas.</p>`;
+  if(fLim.length) h+=`<p class="mini" style="margin:8px 0 0">O bucket recusa arquivos desse tamanho. No SQL Editor do Supabase, rode <code>${esc(SQL_LIMITE)}</code> e importe a pasta de novo.</p>`;
+  if(fOut.length){
+    h+='<div class="faillist">'+fOut.slice(0,30).map(x=>`${esc(x.nome)} — ${esc(x.motivo)}`).join('<br>')+(fOut.length>30?`<br>… e mais ${fOut.length-30}`:'')+'</div>';
   }
   if(r.revisar||r.semDono||r.novosNomes) h+='<p class="mini" style="margin-top:12px">As fotos pendentes ficam em “Fotos a confirmar”, na aba Colaboradores. Nada foi descartado.</p>';
   const btns=[{label:'Fechar',primary:!(r.revisar||r.semDono||r.novosNomes)}];
@@ -4142,6 +4269,7 @@ function htmlPainelBase(u,est){
         <button type="button" class="btn sm" id="bpLimpar">Limpeza profunda</button>
         <button type="button" class="btn sm" id="bpMelhor">Manter só a melhor foto</button>
         <button type="button" class="btn sm" id="bpMemoria">Limpar memória do app</button>
+        <button type="button" class="btn sm ghost" id="bpPlano">Limite do plano</button>
         <button type="button" class="btn sm ghost" id="bpRecuperar">Recuperar cópia antiga</button>
       </div>`
     :`<p class="mini" style="margin:0">O Supabase não está disponível agora. Sem ele o app não mostra nem salva o cadastro.</p>`;
@@ -4167,6 +4295,7 @@ $('#btnEspaco').onclick=async()=>{
   liga('#bpLimpar',()=>limpezaManual());
   liga('#bpMelhor',()=>liberarEspaco());
   liga('#bpRecuperar',()=>recuperarCopiaAntiga());
+  liga('#bpPlano',()=>definirPlano());
   liga('#bpMemoria',()=>{
     state.imgCache.clear(); _retas.clear(); state.blobs.clear(); state.thumbs.clear(); BLOBS.clear();
     toast('Memória do app liberada.',2600);
