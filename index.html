@@ -553,7 +553,7 @@ body.hud-icons .top{width:78px}.hud-icons main{margin-left:78px}.hud-icons .bran
 .hud-icons .tabs button::before{display:none}
 @media(max-width:920px){.nav-ico{display:none}}
 
-@media(max-width:900px){body.hud-right main,body.hud-icons.hud-right main{margin-right:0}.pending-head{align-items:flex-start;flex-direction:column}.pending-actions{justify-content:flex-start}.top{width:220px}.brand .mark{width:64px;height:50px}}
+@media(max-width:900px){body.hud-right main,body.hud-icons.hud-right main{margin-right:0}.pending-head{align-items:flex-start;flex-direction:column}.pending-actions{justify-content:flex-start}.brand .mark{width:64px;height:50px}}
 /* Os dois ícones do topo usam o mesmo desenho a traço, mesma caixa e mesma
    espessura, para não parecerem de famílias diferentes. */
 .iconbtn .ico{display:grid;place-items:center;width:19px;height:19px;flex:none}
@@ -762,6 +762,28 @@ body.hud-right main{margin:0 268px 0 0}
   body.hud-top main{padding-top:100px}
   body.hud-bottom main{padding-bottom:100px}
 }
+
+/* ---- Início ---- */
+.nav-home:before{width:14px;height:9px;border:1.7px solid currentColor;border-radius:2px 2px 3px 3px;left:3px;top:10px}
+.nav-home:after{width:10px;height:10px;border-left:1.7px solid currentColor;border-top:1.7px solid currentColor;border-radius:2px 0 0 0;transform:rotate(45deg);left:5px;top:3px}
+.inicio-acoes{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:14px;margin:0 0 22px}
+.inicio-card{display:flex;align-items:center;gap:14px;text-align:left;padding:18px 20px;border-radius:var(--r);border:1px solid var(--line);background:var(--panel);color:var(--ink);cursor:pointer;font:inherit;transition:border-color .18s,transform .18s,box-shadow .18s}
+.inicio-card:hover{border-color:var(--accent);transform:translateY(-1px);box-shadow:var(--shadow)}
+.inicio-card:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.inicio-card.principal{background:var(--accent);border-color:var(--accent);color:var(--onaccent)}
+.inicio-card b{display:block;font-size:15px;font-weight:700}
+.inicio-card small{display:block;margin-top:3px;font-size:12.5px;color:var(--ink3)}
+.inicio-card.principal small{color:inherit;opacity:.88}
+.inicio-ico{flex:none;width:40px;height:40px;border-radius:12px;display:grid;place-items:center;background:var(--accent-soft);color:var(--accent-ink);font-size:17px}
+.inicio-card.principal .inicio-ico{background:rgba(255,255,255,.2);color:var(--onaccent)}
+.inicio-seta{margin-left:auto;font-size:18px;opacity:.6}
+.inicio-cols{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr);gap:18px;align-items:start}
+.inicio-texto{margin:0;line-height:1.7;color:var(--ink2);font-size:14px}
+.inicio-passos{list-style:none;margin:0;padding:0;counter-reset:passo;display:grid;gap:16px}
+.inicio-passos li{counter-increment:passo;display:grid;grid-template-columns:28px 1fr;gap:12px;align-items:start;line-height:1.6;font-size:14px;color:var(--ink2)}
+.inicio-passos li:before{content:counter(passo);width:26px;height:26px;border-radius:50%;background:var(--accent-soft);color:var(--accent-ink);font-weight:700;font-size:13px;display:grid;place-items:center}
+.inicio-passos b{color:var(--ink)}
+@media(max-width:860px){.inicio-cols{grid-template-columns:1fr}}
 </style>
 </head>
 <body class="booting">
@@ -801,7 +823,8 @@ body.hud-right main{margin:0 268px 0 0}
       <span class="nm"><b class="brand-aniver">Aniver</b><b class="brand-cut">Cut</b><span id="brandsub">estúdio de artes</span></span>
     </div>
     <div class="tabs" role="tablist">
-      <button role="tab" data-tab="aniv" aria-selected="true"><span class="nav-ico nav-birthday" aria-hidden="true"><i></i></span><span class="nav-label">Aniversariantes</span></button>
+      <button role="tab" data-tab="inicio" aria-selected="true"><span class="nav-ico nav-home" aria-hidden="true"><i></i></span><span class="nav-label">Início</span></button>
+      <button role="tab" data-tab="aniv" aria-selected="false"><span class="nav-ico nav-birthday" aria-hidden="true"><i></i></span><span class="nav-label">Aniversariantes</span></button>
       <button role="tab" data-tab="arte" aria-selected="false"><span class="nav-ico nav-art" aria-hidden="true"><i></i></span><span class="nav-label">Arte</span></button>
       <button role="tab" data-tab="colab" aria-selected="false"><span class="nav-ico nav-people" aria-hidden="true"><i></i></span><span class="nav-label">Colaboradores</span></button>
     </div>
@@ -817,8 +840,50 @@ body.hud-right main{margin:0 268px 0 0}
 
 <main>
 
+<!-- ============ INÍCIO ============ -->
+<section id="tab-inicio">
+  <div class="workspace-head">
+    <div>
+      <span class="eyebrow">BEM-VINDO(A)</span>
+      <h1>Bem-vindo ao AniverCut</h1>
+      <p>Artes de aniversariantes prontas em poucos cliques.</p>
+    </div>
+  </div>
+  <div class="inicio-acoes">
+    <button class="inicio-card principal" id="inicioGerar" type="button">
+      <span class="inicio-ico" aria-hidden="true">▶</span>
+      <span class="inicio-txt"><b>Gerar as artes do mês</b><small id="inicioMes">—</small></span>
+      <span class="inicio-seta" aria-hidden="true">→</span>
+    </button>
+    <button class="inicio-card" id="inicioAssistente" type="button">
+      <span class="inicio-ico" aria-hidden="true">✦</span>
+      <span class="inicio-txt"><b>Abrir o assistente de ajuda</b><small>Tire dúvidas e peça ações por chat</small></span>
+      <span class="inicio-seta" aria-hidden="true">→</span>
+    </button>
+  </div>
+  <div class="inicio-cols">
+    <div class="panel">
+      <div class="panel-h"><h2>O que é o AniverCut</h2></div>
+      <div class="panel-b">
+        <p class="inicio-texto">O AniverCut cria a arte “Aniversariante do dia” de cada colaborador. Você cadastra as pessoas e as fotos e informa quem faz aniversário no mês. O app enquadra o rosto na foto, coloca o chapéu e escreve o nome e a data. No fim, é só baixar as artes.</p>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-h"><h2>Passo a passo do primeiro uso</h2></div>
+      <div class="panel-b">
+        <ol class="inicio-passos">
+          <li><span><b>Cadastre os colaboradores e as fotos.</b> Em <b>Colaboradores</b>, clique em <b>Importar pasta</b> e escolha uma pasta com uma subpasta para cada pessoa. O nome da subpasta é o nome do colaborador.</span></li>
+          <li><span><b>Informe os aniversariantes do mês.</b> Em <b>Aniversariantes</b>, clique em <b>Importar lista</b> (uma pessoa por linha, como 06/10 – Nome Completo) ou em <b>Adicionar pessoa</b>.</span></li>
+          <li><span><b>Confira o que está marcado para revisar.</b> Clique em uma pessoa para abrir a arte e, se precisar, ajustar o enquadramento e o chapéu.</span></li>
+          <li><span><b>Gere e baixe.</b> Clique em <b>Gerar artes do mês</b> e depois em <b>Baixar todas (ZIP)</b>.</span></li>
+        </ol>
+      </div>
+    </div>
+  </div>
+</section>
+
 <!-- ============ ANIVERSARIANTES ============ -->
-<section id="tab-aniv">
+<section id="tab-aniv" hidden>
   <div class="workspace-head">
     <div>
       <span class="eyebrow">PAINEL DE PRODUÇÃO</span>
@@ -1431,7 +1496,7 @@ class CacheImg extends Map{                 // imagens já decodificadas, com li
   get(k){ if(!super.has(k)) return undefined; const v=super.get(k); super.delete(k); super.set(k,v); return v; }
 }
 const state={people:[],photos:{},months:{},year:new Date().getFullYear(),month:new Date().getMonth()+1,
-             entryId:null,tab:'aniv',imgCache:new CacheImg(4),blobs:new Map(),thumbs:new Map()};
+             entryId:null,tab:'inicio',imgCache:new CacheImg(4),blobs:new Map(),thumbs:new Map()};
 const PENDING='__pendente__';
 const mk=(y,m)=>`${y}-${String(m).padStart(2,'0')}`;
 
@@ -3968,11 +4033,43 @@ async function personDialog(id){
 function setTab(t){
   state.tab=t;
   $$('.tabs button').forEach(b=>b.setAttribute('aria-selected',String(b.dataset.tab===t)));
+  $('#tab-inicio').hidden=t!=='inicio';
   $('#tab-aniv').hidden=t!=='aniv';
   $('#tab-arte').hidden=t!=='arte';
   $('#tab-colab').hidden=t!=='colab';
+  if(t==='inicio') renderInicio();
 }
 $$('.tabs button').forEach(b=>b.onclick=()=>setTab(b.dataset.tab));
+/* ---------------------------------------------------------------------------
+   PÁGINA INICIAL
+   Primeira tela a cada vez que o site abre: o que é o app, o passo a passo do primeiro uso e
+   dois atalhos (gerar as artes do mês e abrir o assistente).
+   --------------------------------------------------------------------------- */
+function nomeDoMes(y,m){
+  const t=new Date(y,m-1,1).toLocaleDateString('pt-BR',{month:'long',year:'numeric'});
+  return t.charAt(0).toUpperCase()+t.slice(1);
+}
+function renderInicio(){
+  const el=$('#inicioMes'); if(!el) return;
+  const rec=state.months[mk(state.year,state.month)];
+  const n=rec?rec.entries.length:0;
+  el.textContent=nomeDoMes(state.year,state.month)+' · '+(n?`${n} aniversariante${n>1?'s':''}`:'nenhum aniversariante ainda');
+}
+{ const btn=$('#inicioGerar');
+  if(btn) btn.onclick=async()=>{
+    const key=mk(state.year,state.month), rec=await getMonth(key);
+    setTab('aniv');
+    if(!rec.entries.length){ toast(`Nenhum aniversariante em ${nomeDoMes(state.year,state.month).toLowerCase()}. Importe a lista para começar.`,5200); return; }
+    await generateMonth(key);
+  };
+  const ass=$('#inicioAssistente');
+  if(ass) ass.onclick=()=>{ const b=$('#btnAssistant'); if(b) b.click(); };
+}
+// o resumo do mês acompanha as mudanças nas listas (salvar um mês e repintar a tela do mês)
+{ const _renderMonth=renderMonth;
+  renderMonth=async function(...a){ const r=await _renderMonth.apply(this,a); try{ renderInicio(); }catch(e){} return r; };
+  const _saveMonth=saveMonth;
+  saveMonth=function(rec){ const p=_saveMonth.call(this,rec); try{ renderInicio(); }catch(e){} return p; }; }
 
 $('#yearSel').onchange=e=>{ state.year=parseInt(e.target.value,10); renderMonths(); renderMonth(); };
 async function collectDirectoryFiles(dir,rootName=''){
@@ -5113,7 +5210,8 @@ async function catalogSelectedPending(){
     {k:['limpar','cadastro'],a:'people',r:['Limpar cadastro remove todos os colaboradores e fotos. As listas de aniversariantes continuam, só ficam sem foto. Ele confirma antes, mostrando os números.']},
     {k:['backup','exportar','cadastro'],a:'people',r:['Em Colaboradores, Backup, Exportar gera um arquivo com cadastros e fotos. No outro computador, use Restaurar.']},
     {k:['restaurar'],a:'people',r:['Restaurar lê o arquivo de backup e devolve cadastros, fotos e meses. O que já existe é mantido.']},
-    {k:['dados','onde','ficam'],r:['O cadastro e as fotos ficam só no Supabase, exatamente como foram enviadas, sem redução de qualidade. Este computador não guarda cópia: ao abrir, o app lê tudo do Supabase.']},
+    {k:['pagina','inicial','inicio','comecar','primeiro','uso'],r:['A página Início abre sempre que o site é aberto. Ela explica o que é o AniverCut, traz o passo a passo do primeiro uso e dois atalhos: gerar as artes do mês e abrir este assistente. Para voltar a ela, use Início no menu.']},
+  {k:['dados','onde','ficam'],r:['O cadastro e as fotos ficam só no Supabase, exatamente como foram enviadas, sem redução de qualidade. Este computador não guarda cópia: ao abrir, o app lê tudo do Supabase.']},
     {k:['perder','dados'],r:['Limpar os dados do site não apaga nada: o cadastro está só no Supabase e aparece de novo na próxima abertura. Mesmo assim, exporte um backup de vez em quando.']},
     {k:['internet','offline'],r:['O app precisa de internet: não há cópia neste computador. Sem conexão ele avisa e não salva nada, para nenhuma alteração parecer feita sem estar.']},
     {k:['celular','mobile'],r:['No celular funciona, mas a importação de pasta não existe em navegador móvel. Use fotos soltas ou faça a importação pelo computador.']},
