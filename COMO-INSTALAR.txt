@@ -1,0 +1,65 @@
+AKICUT + DEX · COMO INSTALAR NO VERCEL
+======================================
+
+O QUE TEM NESTA PASTA
+  index.html                  o site (logo nova, animações e o Dex ligado)
+  dex.js                      o Dex: personagem, chat com IA e painel de personalização
+  api/dex.js                  a função que conversa com a IA (roda no Vercel, a chave fica escondida)
+  api/_dex-conhecimento.js    tudo o que o Dex sabe sobre o site (dá para editar e ensinar coisas novas)
+
+Os quatro arquivos precisam ficar juntos, nesta mesma estrutura, na raiz do projeto do Vercel.
+
+
+PASSO 1 · Colocar a chave da IA no Vercel (só uma vez)
+  1. Abra vercel.com, entre no projeto do AkiCut.
+  2. Settings → Environment Variables.
+  3. Key: GROQ_API_KEY
+     Value: a sua chave do Groq (a que começa com gsk_)
+     Marque Production, Preview e Development → Save.
+  Importante: a chave NUNCA vai dentro do index.html nem do dex.js. Se ela aparecer em algum
+  lugar público, gere outra em console.groq.com → API Keys e troque aqui.
+
+PASSO 2 · Enviar os arquivos
+  Se o projeto está ligado ao GitHub:
+    substitua o index.html, adicione o dex.js e a pasta api, faça o commit. O Vercel publica sozinho.
+  Se você publica pelo computador (Vercel CLI):
+    copie os arquivos para a pasta do projeto e rode: vercel --prod
+
+PASSO 3 · Publicar de novo depois de criar a variável
+  O Vercel só lê a chave nova em uma publicação nova. Em Deployments → no último → Redeploy.
+
+PASSO 4 · Testar
+  1. Abra https://akicut.vercel.app/api/dex
+     Deve aparecer: {"ok":true,"ia":true}   ("ia":false = a variável não foi lida; refaça os passos 1 e 3)
+  2. Abra o site, clique no Dex e pergunte algo como "como importo as fotos?".
+     No topo do chat deve aparecer "online · com inteligência artificial".
+
+
+LIMITES (plano gratuito do Groq)
+  Cerca de 1.000 mensagens por dia e 30 por minuto, mas o limite que pesa é o de texto:
+  dá para algo entre 100 e 200 perguntas por dia. Para economizar, os comandos rápidos
+  (resumo, pendências, hoje, gerar mês, colar lista, digitar /) não usam a IA.
+  Quando o limite acaba, o Dex avisa e continua respondendo com as respostas locais.
+  Reserva opcional: crie também OPENROUTER_API_KEY (chave do OpenRouter); o Dex usa quando o Groq esgotar.
+
+
+PRIVACIDADE
+  O Dex manda para a IA só a pergunta, as últimas mensagens da conversa e números gerais
+  (quantos aniversariantes, fotos etc.). Não manda fotos nem a lista de nomes do cadastro.
+  Mesmo assim, evite digitar dados pessoais sensíveis no chat.
+
+
+PERSONALIZAR O DEX
+  Passe o mouse sobre ele e clique no lápis (ou no lápis do topo do chat, ou em Configurações →
+  Assistente (Dex) → Personalizar o Dex): nome, tamanho, cor dos olhos, acabamento, acessório,
+  animações, seguir o mouse, dicas em balão e lado da tela. Fica salvo no navegador de cada pessoa.
+
+ENSINAR ALGO NOVO AO DEX
+  Em api/_dex-conhecimento.js, adicione um item na lista TRECHOS:
+    { "k": ["palavra", "outra palavra"], "t": "O texto que o Dex deve saber." },
+
+REAÇÕES DO DEX
+  passar o mouse: fica feliz e acena · clicar: pula e abre o chat · clicar várias vezes com o chat
+  aberto: olhos de coração (e tonto, se exagerar) · digitar: inclina a cabeça e olha para o campo ·
+  esperando a IA: pensa, mão no queixo · respondendo: fala · erro: fica triste · 75 s parado: dorme
+  (acorda assustado ao mexer o mouse) · troca de aba: olha para o menu e dá uma dica.
